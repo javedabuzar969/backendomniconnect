@@ -33,14 +33,14 @@ const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:5173';
 const BACKEND_PORT = process.env.PORT || 5000;
 const getRedirectUri = (req) => {
   if (process.env.META_OAUTH_REDIRECT_URI) {
-    return process.env.META_OAUTH_REDIRECT_URI;
+    return process.env.META_OAUTH_REDIRECT_URI.trim();
   }
   const host = req?.get('x-forwarded-host') || req?.get('host') || `localhost:${BACKEND_PORT}`;
   const protocol = req?.get('x-forwarded-proto') || (req?.secure ? 'https' : 'http');
   return `${protocol}://${host}/api/integrations/facebook/oauth/callback`;
 };
 
-const WEBHOOK_VERIFY_TOKEN = process.env.META_WEBHOOK_VERIFY_TOKEN || 'omniconnect_meta_verify_token_2026';
+const WEBHOOK_VERIFY_TOKEN = (process.env.META_WEBHOOK_VERIFY_TOKEN || 'omniconnect_meta_verify_token_2026').trim();
 
 /**
  * GET /api/integrations/facebook/config
@@ -50,7 +50,7 @@ router.get('/config', (req, res) => {
   res.json({
     success: true,
     data: {
-      appId: process.env.META_APP_ID || null,
+      appId: (process.env.META_APP_ID || '').trim() || null,
       redirectUri: getRedirectUri(req),
       webhookVerifyToken: WEBHOOK_VERIFY_TOKEN,
     },
