@@ -1,8 +1,4 @@
 // backend/server.js — Main Express Server
-import dns from 'node:dns';
-try {
-  dns.setServers(['8.8.8.8', '1.1.1.1']);
-} catch {}
 import 'dotenv/config';
 import express from 'express';
 import cors from 'cors';

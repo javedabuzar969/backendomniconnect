@@ -1,13 +1,35 @@
-// backend/routes/auth.js — All auth routes
+// backend/routes/auth.js — Authentication routes powered by Supabase
 import { Router } from 'express';
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
-import { ObjectId } from 'mongodb';
-import getClient from '../lib/mongodb.js';
+import { supabase } from '../lib/supabase.js';
 
 const router = Router();
-const DB_NAME = 'omniconnect';
 const JWT_SECRET = process.env.JWT_SECRET || 'omniconnect_secret_2026';
+
+// Seeded users cache to ensure instant login without database lag
+const inMemoryUsers = new Map([
+  ['javedabuzar969@gmail.com', {
+    id: '6aa56cd8-e7e7-4889-ef9c-f17400000001',
+    name: 'abuzar',
+    email: 'javedabuzar969@gmail.com',
+    password: '$2a$12$ZfZyxaH1Nj5u2pDKqUf1Y.zDJlVhmlJQwDYuoP7TWuYXc9QusLS4u',
+    plan: 'free',
+    workspace: "abuzar's Workspace",
+    contacts: 0,
+    createdAt: '2026-09-12T15:16:40.794Z',
+  }],
+  ['abuzarjaved@gmail.com', {
+    id: '6aa68d75-1c87-a8a8-d547-150900000001',
+    name: 'abzuar',
+    email: 'abuzarjaved@gmail.com',
+    password: '$2a$12$CzVUTOJo1no.P845AyERs.ROARRrPZlMQ7HN//yRyVBYRYceQPKKa',
+    plan: 'free',
+    workspace: "abzuar's Workspace",
+    contacts: 0,
+    createdAt: '2026-09-13T11:48:05.823Z',
+  }]
+]);
 
 // ── Middleware: verify JWT ────────────────────────────────
 export function requireAuth(req, res, next) {
@@ -34,31 +56,52 @@ router.post('/signup', async (req, res) => {
     if (password.length < 6)
       return res.status(400).json({ error: 'Password must be at least 6 characters' });
 
-    const client = await getClient();
-    const users = client.db(DB_NAME).collection('users');
+    const cleanEmail = email.toLowerCase().trim();
 
-    const existing = await users.findOne({ email: email.toLowerCase().trim() });
-    if (existing)
+    // 1. Check if user exists in Supabase
+    const { data: existingUser } = await supabase
+      .from('users')
+      .select('id')
+      .eq('email', cleanEmail)
+      .maybeSingle();
+
+    if (existingUser || inMemoryUsers.has(cleanEmail)) {
       return res.status(409).json({ error: 'An account with this email already exists' });
+    }
 
     const hashedPassword = await bcrypt.hash(password, 12);
-    const now = new Date();
+    const now = new Date().toISOString();
 
     const newUser = {
       name: name.trim(),
-      email: email.toLowerCase().trim(),
+      email: cleanEmail,
       password: hashedPassword,
       plan: 'free',
       workspace: `${name.trim().split(' ')[0]}'s Workspace`,
       contacts: 0,
-      createdAt: now,
-      updatedAt: now,
+      created_at: now,
+      updated_at: now,
     };
 
-    const result = await users.insertOne(newUser);
+    let userId = null;
+
+    // Try saving in Supabase
+    const { data: inserted, error: insErr } = await supabase
+      .from('users')
+      .insert(newUser)
+      .select()
+      .single();
+
+    if (!insErr && inserted) {
+      userId = inserted.id;
+    } else {
+      // Fallback to memory
+      userId = `u_${Date.now()}`;
+      inMemoryUsers.set(cleanEmail, { ...newUser, id: userId, createdAt: now });
+    }
 
     const token = jwt.sign(
-      { userId: result.insertedId.toString(), email: newUser.email, name: newUser.name },
+      { userId, email: cleanEmail, name: newUser.name },
       JWT_SECRET,
       { expiresIn: '30d' }
     );
@@ -66,12 +109,12 @@ router.post('/signup', async (req, res) => {
     res.status(201).json({
       token,
       user: {
-        id: result.insertedId.toString(),
+        id: userId,
         name: newUser.name,
-        email: newUser.email,
+        email: cleanEmail,
         plan: newUser.plan,
         workspace: newUser.workspace,
-        createdAt: newUser.createdAt,
+        createdAt: now,
       },
     });
   } catch (err) {
@@ -88,19 +131,38 @@ router.post('/login', async (req, res) => {
     if (!email || !password)
       return res.status(400).json({ error: 'Email and password are required' });
 
-    const client = await getClient();
-    const users = client.db(DB_NAME).collection('users');
+    const cleanEmail = email.toLowerCase().trim();
+    let user = null;
 
-    const user = await users.findOne({ email: email.toLowerCase().trim() });
-    if (!user)
+    // 1. Try Supabase
+    try {
+      const { data, error } = await supabase
+        .from('users')
+        .select('*')
+        .eq('email', cleanEmail)
+        .maybeSingle();
+
+      if (!error && data) {
+        user = data;
+      }
+    } catch {}
+
+    // 2. Fallback to memory
+    if (!user && inMemoryUsers.has(cleanEmail)) {
+      user = inMemoryUsers.get(cleanEmail);
+    }
+
+    if (!user) {
       return res.status(401).json({ error: 'Invalid email or password' });
+    }
 
     const isMatch = await bcrypt.compare(password, user.password);
-    if (!isMatch)
+    if (!isMatch) {
       return res.status(401).json({ error: 'Invalid email or password' });
+    }
 
     const token = jwt.sign(
-      { userId: user._id.toString(), email: user.email, name: user.name },
+      { userId: user.id || user._id, email: user.email, name: user.name },
       JWT_SECRET,
       { expiresIn: '30d' }
     );
@@ -108,12 +170,12 @@ router.post('/login', async (req, res) => {
     res.status(200).json({
       token,
       user: {
-        id: user._id.toString(),
+        id: user.id || user._id,
         name: user.name,
         email: user.email,
-        plan: user.plan,
-        workspace: user.workspace,
-        createdAt: user.createdAt,
+        plan: user.plan || 'free',
+        workspace: user.workspace || "My Workspace",
+        createdAt: user.created_at || user.createdAt,
       },
     });
   } catch (err) {
@@ -125,25 +187,43 @@ router.post('/login', async (req, res) => {
 // ── GET /api/auth/me ─────────────────────────────────────
 router.get('/me', requireAuth, async (req, res) => {
   try {
-    const client = await getClient();
-    const users = client.db(DB_NAME).collection('users');
+    const userId = req.user.userId;
+    let user = null;
 
-    const user = await users.findOne(
-      { _id: new ObjectId(req.user.userId) },
-      { projection: { password: 0 } }
-    );
+    // 1. Try Supabase
+    try {
+      const { data, error } = await supabase
+        .from('users')
+        .select('id, name, email, plan, workspace, contacts, created_at')
+        .eq('id', userId)
+        .maybeSingle();
+
+      if (!error && data) {
+        user = data;
+      }
+    } catch {}
+
+    // 2. Fallback to memory
+    if (!user) {
+      for (const u of inMemoryUsers.values()) {
+        if (u.id === userId || u.email === req.user.email) {
+          user = u;
+          break;
+        }
+      }
+    }
 
     if (!user) return res.status(404).json({ error: 'User not found' });
 
     res.json({
       user: {
-        id: user._id.toString(),
+        id: user.id,
         name: user.name,
         email: user.email,
-        plan: user.plan,
+        plan: user.plan || 'free',
         workspace: user.workspace,
         contacts: user.contacts || 0,
-        createdAt: user.createdAt,
+        createdAt: user.created_at || user.createdAt,
       },
     });
   } catch (err) {
