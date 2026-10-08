@@ -159,9 +159,13 @@ router.get('/oauth/callback', async (req, res) => {
         </head>
         <body>
           <div class="card">
-            <div class="spinner"></div>
-            <h3 style="margin: 0 0 8px; font-size: 16px;">Meta Connected Successfully</h3>
-            <p style="margin: 0; font-size: 13px; color: #64748b;">Loading your accessible Facebook Pages...</p>
+            <div style="font-size: 44px; margin-bottom: 12px;">✅</div>
+            <h3 style="margin: 0 0 8px; font-size: 18px; font-weight: 600;">Meta Connected Successfully!</h3>
+            <p style="margin: 0 0 18px; font-size: 14px; color: #64748b;">Aapka Meta account link ho gaya hai.</p>
+            <a id="continueBtn" href="${FRONTEND_URL}/connect-facebook?state=${state}&oauth=success"
+               style="display: inline-block; background: #0066ff; color: #ffffff; padding: 10px 20px; border-radius: 8px; text-decoration: none; font-weight: 500; font-size: 14px;">
+              Continue to OmniConnect ➔
+            </a>
           </div>
           <script>
             try {
@@ -171,13 +175,22 @@ router.get('/oauth/callback', async (req, res) => {
                   state: '${state}',
                   pagesCount: ${realPages.length}
                 }, '*');
-                setTimeout(() => window.close(), 600);
-              } else {
+                setTimeout(() => window.close(), 1000);
+              }
+            } catch (e) {}
+
+            // Auto-redirect if popup wasn't closed by browser
+            setTimeout(() => {
+              try {
+                if (window.opener) {
+                  window.close();
+                } else {
+                  window.location.href = '${FRONTEND_URL}/connect-facebook?state=${state}&oauth=success';
+                }
+              } catch (err) {
                 window.location.href = '${FRONTEND_URL}/connect-facebook?state=${state}&oauth=success';
               }
-            } catch (e) {
-              window.location.href = '${FRONTEND_URL}/connect-facebook?state=${state}&oauth=success';
-            }
+            }, 2000);
           </script>
         </body>
       </html>
