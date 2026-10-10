@@ -136,6 +136,28 @@ router.get('/:id', async (req, res) => {
 });
 
 /**
+ * POST /api/conversations/:id/read
+ * Mark inbound messages as read for this conversation
+ */
+router.post('/:id/read', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { data: contact } = await supabase.from('contacts').select('*').eq('id', id).single();
+    if (contact) {
+      await supabase
+        .from('messages')
+        .update({ status: 'read' })
+        .eq('direction', 'inbound')
+        .or(`contact_id.eq.${contact.id},phone_number.eq.${contact.phone_number}`);
+    }
+    return res.json({ success: true, message: 'Marked as read' });
+  } catch (error) {
+    console.warn('[Mark Read Error]', error.message);
+    return res.json({ success: false, error: error.message });
+  }
+});
+
+/**
  * POST /api/conversations/:id/messages
  * Send real reply message from Agent in Inbox to Customer
  * Calls Meta Messenger Send API for Facebook, or Meta Cloud API for WhatsApp.
