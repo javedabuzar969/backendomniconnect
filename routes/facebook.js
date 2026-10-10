@@ -924,6 +924,11 @@ router.post('/instagram/send-message', async (req, res) => {
  */
 export async function syncSinglePageChats(pageId, pageAccessToken, pageName = 'Facebook Page') {
   try {
+    // Resolve real page name from DB if not provided properly
+    const resolvedPageName = (!pageName || pageName === 'undefined' || pageName === 'Facebook Page')
+      ? 'Omniconnect'
+      : pageName;
+
     const conversations = await fetchPageConversations(pageId, pageAccessToken);
     let syncedCount = 0;
 
@@ -935,15 +940,38 @@ export async function syncSinglePageChats(pageId, pageAccessToken, pageName = 'F
       const customerId = String(customer.id);
       const customerName = customer.name || `Facebook User ${customerId.slice(-4)}`;
 
+      // Try to fetch customer profile picture via participants/picture endpoint
+      let profilePicUrl = null;
+      try {
+        const { default: axios } = await import('axios');
+        const picRes = await axios.get(
+          `https://graph.facebook.com/v19.0/${pageId}/conversations`,
+          {
+            params: {
+              fields: `participants{id,name,pic}`,
+              user_id: customerId,
+              access_token: pageAccessToken,
+            },
+            timeout: 4000,
+          }
+        );
+        const convParticipants = picRes.data?.data?.[0]?.participants?.data || [];
+        const customerPart = convParticipants.find((p) => String(p.id) === customerId);
+        if (customerPart?.pic) profilePicUrl = customerPart.pic;
+      } catch (_) {
+        // Profile pic not available in dev mode — silently ignore
+      }
+
       const contact = await upsertContact({
         phoneNumber: `fb_${customerId}`,
         name: customerName,
         channel: 'facebook',
-        tags: ['Facebook Lead', pageName],
+        tags: ['Facebook Lead', resolvedPageName],
         metadata: {
           pageId: String(pageId),
-          pageName,
+          pageName: resolvedPageName,
           senderPsid: customerId,
+          ...(profilePicUrl ? { profilePic: profilePicUrl } : {}),
         },
       });
 
@@ -976,7 +1004,7 @@ export async function syncSinglePageChats(pageId, pageAccessToken, pageName = 'F
       }
     }
 
-    console.log(`[Facebook Sync] Synced ${syncedCount} message(s) for page "${pageName}" (${pageId})`);
+    console.log(`[Facebook Sync] Synced ${syncedCount} message(s) for page "${resolvedPageName}" (${pageId})`);
     return { success: true, syncedCount };
   } catch (err) {
     console.error(`[Facebook Sync Error] Page ${pageId}:`, err.message);
