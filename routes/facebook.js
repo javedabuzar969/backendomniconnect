@@ -973,11 +973,13 @@ export async function syncSinglePageChats(pageId, pageAccessToken, pageName = 'F
           senderPsid: customerId,
           ...(profilePicUrl ? { profilePic: profilePicUrl } : {}),
         },
+        updateTimestamp: false, // Don't bump last_interaction_at unless new msg saved below
       });
 
       if (!contact) continue;
 
       const messages = (conv.messages?.data || []).slice().reverse(); // oldest first
+      let newMsgSaved = false;
       for (const msg of messages) {
         if (!msg.id) continue;
 
@@ -1001,7 +1003,17 @@ export async function syncSinglePageChats(pageId, pageAccessToken, pageName = 'F
           status: 'delivered',
         });
         syncedCount++;
+        newMsgSaved = true;
       }
+
+      // Only bump last_interaction_at when a real new message was saved
+      if (newMsgSaved) {
+        await supabase
+          .from('contacts')
+          .update({ last_interaction_at: new Date().toISOString() })
+          .eq('id', contact.id);
+      }
+
     }
 
     console.log(`[Facebook Sync] Synced ${syncedCount} message(s) for page "${resolvedPageName}" (${pageId})`);
