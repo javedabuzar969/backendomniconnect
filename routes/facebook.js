@@ -100,19 +100,26 @@ router.get('/oauth/callback', async (req, res) => {
   // Handle user cancellation or Meta authorization errors
   if (error || !code) {
     console.warn('[Meta OAuth Cancelled/Error]:', error, error_description);
+    const session = state ? await getOAuthSession(state) : null;
+    const isInstagram = session?.type === 'instagram';
+    const errType = isInstagram ? 'IG_AUTH_ERROR' : 'META_AUTH_ERROR';
+    const fallbackUrl = isInstagram
+      ? `${FRONTEND_URL}/connect-instagram?error=cancelled`
+      : `${FRONTEND_URL}/connect-facebook?error=cancelled`;
+
     return res.send(`
       <!DOCTYPE html>
       <html>
-        <head><title>Meta Authentication Failed</title></head>
+        <head><title>${isInstagram ? 'Instagram' : 'Meta'} Authentication Failed</title></head>
         <body style="font-family: sans-serif; text-align: center; padding: 40px;">
-          <h3>Meta Connection Cancelled</h3>
+          <h3>${isInstagram ? 'Instagram' : 'Meta'} Connection Cancelled</h3>
           <p style="color: #64748b;">${error_description || 'Authorization was cancelled or denied.'}</p>
           <script>
             if (window.opener) {
-              window.opener.postMessage({ type: 'META_AUTH_ERROR', error: '${error || 'cancelled'}' }, '*');
+              window.opener.postMessage({ type: '${errType}', error: '${error || 'cancelled'}' }, '*');
               setTimeout(() => window.close(), 1000);
             } else {
-              window.location.href = '${FRONTEND_URL}/connect-facebook?error=cancelled';
+              window.location.href = '${fallbackUrl}';
             }
           </script>
         </body>
@@ -132,6 +139,58 @@ router.get('/oauth/callback', async (req, res) => {
     const redirectUri = session.redirectUri || getRedirectUri(req);
     const tokenData = await exchangeCodeForTokens(code, redirectUri);
     const userAccessToken = tokenData.userAccessToken;
+
+    // 2. If this was an Instagram authorization flow
+    if (session?.type === 'instagram') {
+      const igAccounts = await getInstagramAccounts(userAccessToken);
+      console.log(`[Instagram OAuth] Successfully authorized. Found ${igAccounts.length} Instagram account(s).`);
+
+      await saveOAuthSession(state, {
+        ...session,
+        igAccounts,
+        userAccessToken,
+        type: 'instagram',
+        authorizedAt: new Date().toISOString(),
+      });
+
+      return res.send(`
+        <!DOCTYPE html>
+        <html>
+          <head>
+            <title>Instagram Connected</title>
+            <style>
+              body { font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif; display:flex; flex-direction:column; align-items:center; justify-content:center; height:100vh; margin:0; background:#f8fafc; }
+              .card { background:white; padding:28px; border-radius:16px; box-shadow:0 4px 12px rgba(0,0,0,0.05); text-align:center; max-width:360px; }
+              .spinner { width:36px; height:36px; border:3px solid #e2e8f0; border-top-color:#E1306C; border-radius:50%; animation:spin 0.8s linear infinite; margin:0 auto 16px; }
+              @keyframes spin { to { transform:rotate(360deg); } }
+            </style>
+          </head>
+          <body>
+            <div class="card">
+              <div class="spinner"></div>
+              <h3 style="margin:0 0 8px;font-size:16px">Instagram Connected!</h3>
+              <p style="margin:0;font-size:13px;color:#64748b">Found ${igAccounts.length} Instagram account(s). Loading...</p>
+            </div>
+            <script>
+              try {
+                if (window.opener) {
+                  window.opener.postMessage({
+                    type: 'IG_AUTH_SUCCESS',
+                    state: '${state}',
+                    igCount: ${igAccounts.length}
+                  }, '*');
+                  setTimeout(() => window.close(), 600);
+                } else {
+                  window.location.href = '${FRONTEND_URL}/connect-instagram?state=${state}&oauth=success';
+                }
+              } catch(e) {
+                window.location.href = '${FRONTEND_URL}/connect-instagram?state=${state}&oauth=success';
+              }
+            </script>
+          </body>
+        </html>
+      `);
+    }
 
     // 2. Fetch real Facebook Pages accessible to this authorized user
     const realPages = await getUserAccounts(userAccessToken);
