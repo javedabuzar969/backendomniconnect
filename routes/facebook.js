@@ -932,9 +932,17 @@ router.post('/instagram/connect-account', async (req, res) => {
 
     console.log(`[Instagram Connected] @${targetAccount.igUsername} (IG ID: ${targetAccount.igUserId}) - Webhook: ${webhookStatus}`);
 
+    // Auto-sync historical Instagram conversations immediately in background
+    syncInstagramChats(
+      targetAccount.linkedPageId,
+      targetAccount.pageAccessToken,
+      targetAccount.igUserId,
+      targetAccount.igUsername
+    ).catch((e) => console.warn('[Auto-sync IG Chats Warning]:', e.message));
+
     res.json({
       success: true,
-      message: `Instagram @${targetAccount.igUsername} connected successfully!`,
+      message: `Instagram @${targetAccount.igUsername} connected successfully! Chats are syncing.`,
       account: {
         igUserId: targetAccount.igUserId,
         igUsername: targetAccount.igUsername,
@@ -949,6 +957,114 @@ router.post('/instagram/connect-account', async (req, res) => {
     res.status(500).json({ success: false, error: err.message });
   }
 });
+
+/**
+ * POST /api/integrations/facebook/instagram/sync-chats
+ * Manually trigger full historical chat sync for connected Instagram accounts
+ */
+router.post('/instagram/sync-chats', async (req, res) => {
+  try {
+    const { igUserId } = req.body;
+    let targetPage = null;
+    if (igUserId) {
+      targetPage = await getPageByPageId(`ig_${igUserId}`, true);
+    } else {
+      const { data: pages } = await supabase
+        .from('connected_pages')
+        .select('*')
+        .ilike('page_id', 'ig_%')
+        .eq('status', 'connected')
+        .limit(1);
+      targetPage = pages?.[0];
+    }
+
+    if (!targetPage?.accessToken) {
+      return res.status(404).json({ success: false, error: 'No connected Instagram account found' });
+    }
+
+    const linkedPageId = targetPage.metadata?.linkedPageId || targetPage.page_id.replace('ig_', '');
+    const igId = targetPage.page_id.replace('ig_', '');
+    const result = await syncInstagramChats(
+      linkedPageId,
+      targetPage.accessToken,
+      igId,
+      targetPage.name || 'instagram'
+    );
+
+    res.json({ success: true, ...result });
+  } catch (err) {
+    console.error('[Manual Instagram Sync Error]:', err.message);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+/**
+ * Sync historical Instagram Direct chats for a connected account
+ */
+export async function syncInstagramChats(linkedPageId, pageAccessToken, igUserId, igUsername) {
+  try {
+    const conversations = await fetchPageConversations(linkedPageId, pageAccessToken, 'instagram');
+    console.log(`[Instagram Sync] Fetched ${conversations.length} conversation(s) for @${igUsername}`);
+
+    let totalMessages = 0;
+    for (const conv of conversations) {
+      const participants = conv.participants?.data || [];
+      const customer = participants.find(
+        (p) => String(p.id) !== String(igUserId) && String(p.id) !== String(linkedPageId)
+      );
+      if (!customer?.id) continue;
+
+      const customerId = String(customer.id);
+      const customerName = customer.username || customer.name || `Instagram User ${customerId.slice(-4)}`;
+
+      const contact = await upsertContact({
+        phoneNumber: `ig_${customerId}`,
+        name: customerName,
+        channel: 'instagram',
+        tags: ['Instagram DM', `@${igUsername}`],
+        metadata: {
+          igUserId: customerId,
+          igPageId: igUserId,
+          igAccountName: `@${igUsername}`,
+          senderType: 'instagram',
+        },
+      });
+
+      if (!contact) continue;
+
+      const messages = (conv.messages?.data || []).slice().reverse();
+      for (const msg of messages) {
+        if (!msg.id) continue;
+
+        // Skip if already in database
+        const { data: existing } = await supabase
+          .from('messages')
+          .select('id')
+          .eq('whatsapp_message_id', msg.id)
+          .maybeSingle();
+
+        if (existing) continue;
+
+        const isCustomer = String(msg.from?.id) === customerId;
+        await saveMessage({
+          contactId: contact.id,
+          phoneNumber: `ig_${customerId}`,
+          direction: isCustomer ? 'inbound' : 'outbound',
+          messageType: 'text',
+          content: msg.message || '[Instagram Message]',
+          whatsappMessageId: msg.id,
+          status: 'delivered',
+        });
+        totalMessages++;
+      }
+    }
+    console.log(`[Instagram Sync Complete] Synced ${totalMessages} historical messages for @${igUsername}`);
+    return { success: true, count: totalMessages };
+  } catch (err) {
+    console.error(`[Instagram Sync Error]:`, err.message);
+    return { success: false, error: err.message };
+  }
+}
 
 /**
  * POST /api/integrations/facebook/instagram/send-message
