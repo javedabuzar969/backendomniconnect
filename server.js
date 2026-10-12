@@ -50,21 +50,26 @@ app.use((err, req, res, next) => {
   res.status(500).json({ error: 'Internal server error' });
 });
 
-// ── Start ────────────────────────────────────────────────
-const server = app.listen(PORT, () => {
-  console.log(`\n🚀 OmniConnect Backend running on http://localhost:${PORT}`);
-  console.log(`📡 API endpoints:`);
-  console.log(`   POST http://localhost:${PORT}/api/auth/signup`);
-  console.log(`   POST http://localhost:${PORT}/api/auth/login`);
-  console.log(`   GET  http://localhost:${PORT}/api/auth/me`);
-  console.log(`   GET  http://localhost:${PORT}/api/health\n`);
-});
+// ── Start (Local only — Vercel handles its own listener) ─────────────────────
+// On Vercel, process.env.VERCEL is set — do NOT call listen() there.
+// Vercel imports this file as a serverless function and uses the exported app.
+if (!process.env.VERCEL) {
+  const PORT = process.env.PORT || 4000;
+  const server = app.listen(PORT, () => {
+    console.log(`\n🚀 OmniConnect Backend running on http://localhost:${PORT}`);
+    console.log(`📡 API endpoints:`);
+    console.log(`   POST http://localhost:${PORT}/api/auth/signup`);
+    console.log(`   POST http://localhost:${PORT}/api/auth/login`);
+    console.log(`   GET  http://localhost:${PORT}/api/auth/me`);
+    console.log(`   GET  http://localhost:${PORT}/api/health\n`);
+  });
 
-server.on('error', (err) => {
-  if (err.code === 'EADDRINUSE') {
-    console.error(`\n❌ Port ${PORT} is busy! Run: npx kill-port ${PORT}\n`);
-    process.exit(1);
-  }
-});
+  server.on('error', (err) => {
+    if (err.code === 'EADDRINUSE') {
+      console.error(`\n❌ Port ${PORT} is busy! Run: npx kill-port ${PORT}\n`);
+      process.exit(1);
+    }
+  });
+}
 
 export default app;
