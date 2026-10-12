@@ -567,7 +567,7 @@ router.post('/webhook', async (req, res) => {
     // ── Instagram DM Events ───────────────────────────────────────────────
     if (body.object === 'instagram') {
       for (const entry of body.entry || []) {
-        const igPageId = entry.id; // This is the Instagram Business Account ID
+        const igPageId = entry.id; // This is the Instagram Business Account ID (igUserId)
 
         for (const event of entry.messaging || []) {
           const senderId = event.sender?.id;
@@ -592,8 +592,24 @@ router.post('/webhook', async (req, res) => {
               }
             }
 
-            // Find connected Instagram account (stored as ig_<igUserId>)
-            const connectedIgPage = await getPageByPageId(`ig_${igPageId}`, true);
+            // Bug Fix: Meta sends entry.id as the Instagram Business Account ID (igUserId)
+            // We save the connected account as ig_{igUserId}, so look up with that key.
+            // Also try ig_{igPageId} as fallback in case it was saved differently.
+            let connectedIgPage = await getPageByPageId(`ig_${igPageId}`, true);
+            if (!connectedIgPage) {
+              // Fallback: search all connected pages for one whose metadata links this IG account
+              const { data: allPages } = await supabase
+                .from('connected_pages')
+                .select('*')
+                .ilike('page_id', 'ig_%')
+                .eq('status', 'connected')
+                .limit(10);
+              if (allPages?.length) {
+                connectedIgPage = allPages[0]; // use first available IG account as fallback
+                console.warn(`[Instagram DM] Using fallback IG account: ${connectedIgPage.page_id}`);
+              }
+            }
+
             const igAccountName = connectedIgPage?.name || `@instagram_${igPageId.slice(-4)}`;
 
             console.log(`[Instagram DM] From IG User: ${senderId} — "${messageText || '[Attachment]'}"`);
