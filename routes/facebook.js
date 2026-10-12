@@ -1003,8 +1003,29 @@ router.post('/instagram/sync-chats', async (req, res) => {
  */
 export async function syncInstagramChats(linkedPageId, pageAccessToken, igUserId, igUsername) {
   try {
-    const conversations = await fetchPageConversations(linkedPageId, pageAccessToken, 'instagram');
-    console.log(`[Instagram Sync] Fetched ${conversations.length} conversation(s) for @${igUsername}`);
+    console.log(`[Instagram Sync] Starting sync for @${igUsername} | igUserId=${igUserId} | linkedPageId=${linkedPageId}`);
+
+    // Instagram DMs API: Use /{ig-user-id}/conversations?platform=instagram
+    // OR /{page-id}/conversations?platform=instagram (both work if token has instagram_manage_messages)
+    let conversations = [];
+    let syncError = null;
+
+    // Try primary: call on igUserId directly
+    try {
+      conversations = await fetchPageConversations(igUserId, pageAccessToken, 'instagram');
+      console.log(`[Instagram Sync] Using igUserId endpoint. Found ${conversations.length} conversation(s).`);
+    } catch (primaryErr) {
+      console.warn(`[Instagram Sync] igUserId endpoint failed: ${primaryErr.response?.data?.error?.message || primaryErr.message}`);
+      // Fallback: try on linkedPageId
+      try {
+        conversations = await fetchPageConversations(linkedPageId, pageAccessToken, 'instagram');
+        console.log(`[Instagram Sync] Using linkedPageId endpoint. Found ${conversations.length} conversation(s).`);
+      } catch (fallbackErr) {
+        syncError = fallbackErr.response?.data?.error?.message || fallbackErr.message;
+        console.error(`[Instagram Sync] Both endpoints failed. Error: ${syncError}`);
+        return { success: false, error: syncError, count: 0 };
+      }
+    }
 
     let totalMessages = 0;
     for (const conv of conversations) {
@@ -1061,8 +1082,9 @@ export async function syncInstagramChats(linkedPageId, pageAccessToken, igUserId
     console.log(`[Instagram Sync Complete] Synced ${totalMessages} historical messages for @${igUsername}`);
     return { success: true, count: totalMessages };
   } catch (err) {
-    console.error(`[Instagram Sync Error]:`, err.message);
-    return { success: false, error: err.message };
+    const errDetail = err.response?.data?.error?.message || err.message;
+    console.error(`[Instagram Sync Error]:`, errDetail);
+    return { success: false, error: errDetail };
   }
 }
 
