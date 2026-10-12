@@ -12,10 +12,10 @@ const app = express();
 const PORT = process.env.PORT || 4000;
 
 // ── Middleware ───────────────────────────────────────────
-// Vercel serverless rewrite changes req.url to /server.js; restore original path
+// Vercel serverless rewrite handler: restore original path if rewritten
 app.use((req, res, next) => {
   const original = req.headers['x-matched-path'] || req.headers['x-forwarded-uri'] || req.headers['x-now-route-matches'];
-  if (original && (req.url === '/server.js' || req.url.startsWith('/server.js'))) {
+  if (original && (req.url === '/server.js' || req.url.startsWith('/server.js') || req.url.startsWith('/api/[...all]'))) {
     req.url = original;
   }
   next();
@@ -37,7 +37,7 @@ app.use(express.json({
 app.use(express.urlencoded({ extended: true }));
 
 // ── Health Check ─────────────────────────────────────────
-app.get('/api/health', (req, res) => {
+app.get(['/', '/health', '/api/health'], (req, res) => {
   res.json({ status: 'ok', message: 'OmniConnect Backend is running 🚀' });
 });
 
