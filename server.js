@@ -12,6 +12,15 @@ const app = express();
 const PORT = process.env.PORT || 4000;
 
 // ── Middleware ───────────────────────────────────────────
+// Vercel serverless rewrite changes req.url to /server.js; restore original path
+app.use((req, res, next) => {
+  const original = req.headers['x-matched-path'] || req.headers['x-forwarded-uri'] || req.headers['x-now-route-matches'];
+  if (original && (req.url === '/server.js' || req.url.startsWith('/server.js'))) {
+    req.url = original;
+  }
+  next();
+});
+
 app.use(cors({
   origin: (origin, callback) => {
     // Allow all origins (localhost, Vercel preview, production domain)
