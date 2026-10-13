@@ -1163,18 +1163,20 @@ export async function syncInstagramChats(linkedPageId, pageAccessToken, igUserId
     let conversations = [];
     let syncError = null;
 
-    // 1. Try /{page-id}/conversations?platform=instagram (standard Messenger Platform for IG)
+    // 1. Try /{page-id}/conversations?platform=instagram (standard Meta endpoint for IG)
+    let fetchedFromPage = false;
     if (linkedPageId) {
       try {
         conversations = await fetchPageConversations(linkedPageId, pageAccessToken, 'instagram', 3);
         console.log(`[Instagram Sync] Using linkedPageId (${linkedPageId}) endpoint. Found ${conversations.length} conversation(s).`);
+        fetchedFromPage = true;
       } catch (e) {
         console.warn(`[Instagram Sync] linkedPageId endpoint failed:`, e.response?.data?.error?.message || e.message);
       }
     }
 
-    // 2. Fallback: try on igUserId directly
-    if (conversations.length === 0 && igUserId) {
+    // 2. Fallback: only if linkedPageId query threw an error (not when it returned 0 chats)
+    if (!fetchedFromPage && igUserId) {
       try {
         conversations = await fetchPageConversations(igUserId, pageAccessToken, 'instagram', 3);
         console.log(`[Instagram Sync] Using igUserId (${igUserId}) endpoint. Found ${conversations.length} conversation(s).`);
@@ -1183,7 +1185,7 @@ export async function syncInstagramChats(linkedPageId, pageAccessToken, igUserId
       }
     }
 
-    if (conversations.length === 0 && syncError) {
+    if (!fetchedFromPage && conversations.length === 0 && syncError) {
       console.warn(`[Instagram Sync] Meta API error during sync: ${syncError}`);
       return { success: false, error: syncError, count: 0, skipped: 0 };
     }
