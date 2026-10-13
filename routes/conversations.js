@@ -2,7 +2,7 @@
 import { Router } from 'express';
 import { supabase, saveMessage } from '../lib/supabase.js';
 import { sendWhatsAppText } from '../lib/whatsapp.js';
-import { sendMessengerText } from '../lib/metaGraph.js';
+import { sendMessengerText, sendInstagramDM } from '../lib/metaGraph.js';
 import { getConnectedPages, getPageByPageId } from '../lib/facebookDb.js';
 
 const router = Router();
@@ -10,17 +10,18 @@ const router = Router();
 /**
  * GET /api/conversations
  * Returns active conversations grouped by contact with last message
- * Loaded strictly from database. No mock data.
+ * Solves N+1 query problem with a single batched messages query.
  */
 router.get('/', async (req, res) => {
   try {
-    const { channel, pageId } = req.query;
+    const { channel, pageId, limit = 50, offset = 0 } = req.query;
 
-    // 1. Fetch contacts from Supabase
+    // 1. Fetch contacts from Supabase with pagination
     let query = supabase
       .from('contacts')
       .select('*')
-      .order('last_interaction_at', { ascending: false });
+      .order('last_interaction_at', { ascending: false })
+      .range(Number(offset), Number(offset) + Math.min(Number(limit), 100) - 1);
 
     if (channel && channel !== 'all') {
       query = query.eq('channel', channel);
@@ -37,22 +38,69 @@ router.get('/', async (req, res) => {
       return res.json({ success: true, data: [] });
     }
 
-    // 2. Fetch messages for each contact
-    const conversations = [];
+    // Filter by pageId if requested
+    const filteredContacts = pageId
+      ? contacts.filter((c) => !c.metadata?.pageId || c.metadata.pageId === pageId)
+      : contacts;
 
-    for (const contact of contacts) {
-      // Optional multi-page isolation check
-      if (pageId && contact.metadata?.pageId && contact.metadata.pageId !== pageId) {
-        continue;
-      }
+    if (filteredContacts.length === 0) {
+      return res.json({ success: true, data: [] });
+    }
 
-      const { data: msgs } = await supabase
+    // 2. Batch fetch messages for ALL contacts in a single query (Eliminating N+1 queries)
+    const contactIds = filteredContacts.map((c) => c.id).filter(Boolean);
+    const phoneNumbers = filteredContacts.map((c) => c.phone_number).filter(Boolean);
+
+    let allMsgs = [];
+    if (contactIds.length > 0 || phoneNumbers.length > 0) {
+      const orConditions = [];
+      if (contactIds.length > 0) orConditions.push(`contact_id.in.(${contactIds.join(',')})`);
+      if (phoneNumbers.length > 0) orConditions.push(`phone_number.in.(${phoneNumbers.join(',')})`);
+
+      const { data: msgs, error: mErr } = await supabase
         .from('messages')
         .select('*')
-        .or(`contact_id.eq.${contact.id},phone_number.eq.${contact.phone_number}`)
+        .or(orConditions.join(','))
         .order('created_at', { ascending: true });
 
-      const messageList = (msgs || []).map((m) => ({
+      if (!mErr && msgs) {
+        allMsgs = msgs;
+      }
+    }
+
+    // 3. Group messages by contact ID and phone number in O(1) Maps
+    const msgsByContactId = new Map();
+    const msgsByPhone = new Map();
+
+    for (const m of allMsgs) {
+      if (m.contact_id) {
+        if (!msgsByContactId.has(m.contact_id)) msgsByContactId.set(m.contact_id, []);
+        msgsByContactId.get(m.contact_id).push(m);
+      }
+      if (m.phone_number) {
+        if (!msgsByPhone.has(m.phone_number)) msgsByPhone.set(m.phone_number, []);
+        msgsByPhone.get(m.phone_number).push(m);
+      }
+    }
+
+    // 4. Assemble conversation threads
+    const conversations = filteredContacts.map((contact) => {
+      const combined = [
+        ...(msgsByContactId.get(contact.id) || []),
+        ...(msgsByPhone.get(contact.phone_number) || []),
+      ];
+
+      const seenMsgIds = new Set();
+      const uniqueMsgs = [];
+      for (const m of combined) {
+        if (!seenMsgIds.has(m.id)) {
+          seenMsgIds.add(m.id);
+          uniqueMsgs.push(m);
+        }
+      }
+      uniqueMsgs.sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
+
+      const messageList = uniqueMsgs.map((m) => ({
         id: m.id,
         sender: m.direction === 'inbound' ? 'customer' : 'agent',
         text: m.content || (m.template_name ? `Template: ${m.template_name}` : 'Message'),
@@ -64,7 +112,7 @@ router.get('/', async (req, res) => {
 
       const lastMsg = messageList[messageList.length - 1];
 
-      conversations.push({
+      return {
         id: contact.id,
         name: contact.name || `+${contact.phone_number}`,
         phoneNumber: contact.phone_number,
@@ -82,8 +130,8 @@ router.get('/', async (req, res) => {
           contact.metadata?.profilePic ||
           `https://api.dicebear.com/7.x/initials/svg?seed=${encodeURIComponent(contact.name || contact.phone_number)}`,
         messages: messageList,
-      });
-    }
+      };
+    });
 
     res.json({ success: true, data: conversations });
   } catch (error) {
@@ -160,7 +208,7 @@ router.post('/:id/read', async (req, res) => {
 /**
  * POST /api/conversations/:id/messages
  * Send real reply message from Agent in Inbox to Customer
- * Calls Meta Messenger Send API for Facebook, or Meta Cloud API for WhatsApp.
+ * Supports WhatsApp, Facebook Messenger, and Instagram Direct.
  */
 router.post('/:id/messages', async (req, res) => {
   try {
@@ -198,27 +246,23 @@ router.post('/:id/messages', async (req, res) => {
     // ── 2. Facebook Messenger Reply ───────────────────────────────────
     else if (contact.channel === 'facebook') {
       try {
-        // Extract customer PSID
         const psid = contact.phone_number.replace(/^fb_/, '');
         const targetPageId = contact.metadata?.pageId;
 
-        // Look up connected page's access token
         let page = null;
         if (targetPageId) {
           page = await getPageByPageId(targetPageId, true);
         }
 
-        // If page not found by targetPageId, get any active connected page
         if (!page || !page.accessToken) {
           const connectedPages = await getConnectedPages(null, true);
-          page = connectedPages.find((p) => p.accessToken);
+          page = connectedPages.find((p) => p.accessToken && !p.pageId?.startsWith('ig_'));
         }
 
         if (!page || !page.accessToken) {
           throw new Error('No connected Facebook Page access token found. Please reconnect your Facebook Page.');
         }
 
-        // Call official Meta Messenger Send API
         const metaRes = await sendMessengerText(page.accessToken, psid, content.trim());
         sentExternalId = metaRes.messageId;
         sendStatus = 'sent';
@@ -230,14 +274,45 @@ router.post('/:id/messages', async (req, res) => {
       }
     }
 
-    // ── 3. Persist Outbound Message in Database ────────────────────────
+    // ── 3. Instagram Direct Reply ─────────────────────────────────────
+    else if (contact.channel === 'instagram') {
+      try {
+        const recipientIgUserId = contact.metadata?.igUserId || contact.phone_number.replace(/^ig_/, '');
+        const targetPageId = contact.metadata?.igPageId || contact.metadata?.pageId;
+
+        let page = null;
+        if (targetPageId) {
+          page = (await getPageByPageId(`ig_${targetPageId}`, true)) || (await getPageByPageId(targetPageId, true));
+        }
+
+        if (!page || !page.accessToken) {
+          const connectedPages = await getConnectedPages(null, true);
+          page = connectedPages.find((p) => p.pageId?.startsWith('ig_') && p.accessToken);
+        }
+
+        if (!page || !page.accessToken) {
+          throw new Error('No connected Instagram account access token found. Please reconnect your Instagram account.');
+        }
+
+        const metaRes = await sendInstagramDM(page.accessToken, recipientIgUserId, content.trim());
+        sentExternalId = metaRes.messageId;
+        sendStatus = 'sent';
+        console.log(`[Instagram Reply Sent] To: ${contact.name} (${recipientIgUserId}) - Meta Message ID: ${sentExternalId}`);
+      } catch (igErr) {
+        console.error('[Instagram DM Send API Error]:', igErr.message);
+        sendError = igErr.message;
+        sendStatus = 'failed';
+      }
+    }
+
+    // ── 4. Persist Outbound Message in Database ────────────────────────
     const saved = await saveMessage({
       contactId: contact.id,
       phoneNumber: contact.phone_number,
       direction: 'outbound',
       messageType: 'text',
       content: content.trim(),
-      whatsappMessageId: sentExternalId || `msg_err_${Date.now()}`,
+      whatsappMessageId: sentExternalId || `msg_out_${Date.now()}`,
       status: sendStatus,
       errorMessage: sendError,
     });

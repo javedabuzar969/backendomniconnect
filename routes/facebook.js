@@ -12,6 +12,7 @@ import {
   subscribeInstagramWebhooks,
   unsubscribePageFromWebhooks,
   getCustomerProfile,
+  getInstagramUserProfile,
   verifyWebhookSignature,
   sendMessengerText,
   sendInstagramDM,
@@ -71,6 +72,7 @@ router.get('/oauth/start', async (req, res) => {
     await saveOAuthSession(state, {
       workspaceId,
       redirectUri,
+      type: 'facebook',
       createdAt: new Date().toISOString(),
     });
 
@@ -192,19 +194,19 @@ router.get('/oauth/callback', async (req, res) => {
       `);
     }
 
-    // 2. Fetch real Facebook Pages accessible to this authorized user
+    // 3. Fetch real Facebook Pages accessible to this authorized user
     const realPages = await getUserAccounts(userAccessToken);
     console.log(`[Meta OAuth] Successfully authorized. User has ${realPages.length} accessible page(s).`);
 
-    // 3. Store real pages and token securely in OAuth session for page selection
+    // Store real pages in OAuth session for page selection
     await saveOAuthSession(state, {
       ...session,
       realPages,
       userAccessToken,
+      type: 'facebook',
       authorizedAt: new Date().toISOString(),
     });
 
-    // 4. Return HTML postMessage handler to notify popup opener or redirect
     return res.send(`
       <!DOCTYPE html>
       <html>
@@ -221,7 +223,7 @@ router.get('/oauth/callback', async (req, res) => {
           <div class="card">
             <div style="font-size: 44px; margin-bottom: 12px;">✅</div>
             <h3 style="margin: 0 0 8px; font-size: 18px; font-weight: 600;">Meta Connected Successfully!</h3>
-            <p style="margin: 0 0 18px; font-size: 14px; color: #64748b;">Aapka Meta account link ho gaya hai.</p>
+            <p style="margin: 0 0 18px; font-size: 14px; color: #64748b;">Account linked successfully. Redirecting...</p>
             <a id="continueBtn" href="${FRONTEND_URL}/connect-facebook?state=${state}&oauth=success"
                style="display: inline-block; background: #0066ff; color: #ffffff; padding: 10px 20px; border-radius: 8px; text-decoration: none; font-weight: 500; font-size: 14px;">
               Continue to OmniConnect ➔
@@ -235,11 +237,10 @@ router.get('/oauth/callback', async (req, res) => {
                   state: '${state}',
                   pagesCount: ${realPages.length}
                 }, '*');
-                setTimeout(() => window.close(), 1000);
+                setTimeout(() => window.close(), 800);
               }
             } catch (e) {}
 
-            // Auto-redirect if popup wasn't closed by browser
             setTimeout(() => {
               try {
                 if (window.opener) {
@@ -250,7 +251,7 @@ router.get('/oauth/callback', async (req, res) => {
               } catch (err) {
                 window.location.href = '${FRONTEND_URL}/connect-facebook?state=${state}&oauth=success';
               }
-            }, 2000);
+            }, 1800);
           </script>
         </body>
       </html>
@@ -264,16 +265,13 @@ router.get('/oauth/callback', async (req, res) => {
 /**
  * GET /api/integrations/facebook/pages
  * Retrieves connected Facebook Pages and/or available Pages from an active Meta OAuth session
- * Access tokens are NEVER exposed in response.
  */
 router.get('/pages', async (req, res) => {
   try {
     const { state, workspaceId = 'default_workspace' } = req.query;
 
-    // 1. Fetch connected pages from database
     const connectedPages = await getConnectedPages(workspaceId, false);
 
-    // 2. If user just completed OAuth and passed state, fetch available real pages from session
     let availablePages = [];
     let hasOAuthSession = false;
 
@@ -312,7 +310,6 @@ router.get('/pages', async (req, res) => {
 /**
  * POST /api/integrations/facebook/connect-page
  * Connects a selected real Facebook Page and subscribes it to Messenger webhooks
- * DOES NOT create fake contacts, conversations, or messages.
  */
 router.post('/connect-page', async (req, res) => {
   try {
@@ -322,7 +319,6 @@ router.post('/connect-page', async (req, res) => {
       return res.status(400).json({ success: false, error: 'pageId is required' });
     }
 
-    // 1. Verify that the page exists in the active OAuth session or provided metadata
     let targetPage = null;
     let pageAccessToken = null;
 
@@ -336,7 +332,6 @@ router.post('/connect-page', async (req, res) => {
       }
     }
 
-    // If no active session with this page, check if page is already known
     if (!targetPage) {
       const existing = await getPageByPageId(pageId, true);
       if (existing) {
@@ -352,7 +347,6 @@ router.post('/connect-page', async (req, res) => {
       });
     }
 
-    // 2. Save page securely to database (token is encrypted/server-side only)
     const saved = await saveConnectedPage({
       pageId: targetPage.id || targetPage.pageId,
       pageName: targetPage.name,
@@ -365,11 +359,9 @@ router.post('/connect-page', async (req, res) => {
       webhookStatus: 'subscribing',
     });
 
-    // 3. Real Meta Webhook Subscription: Subscribe page to Messenger events
     const subRes = await subscribePageToWebhooks(targetPage.id || targetPage.pageId, pageAccessToken);
     const webhookStatus = subRes.success ? 'subscribed' : 'webhook_pending';
 
-    // Update webhook status
     await saveConnectedPage({
       pageId: targetPage.id || targetPage.pageId,
       pageName: targetPage.name,
@@ -381,12 +373,11 @@ router.post('/connect-page', async (req, res) => {
 
     console.log(`[Facebook Page Connected] "${targetPage.name}" (ID: ${pageId}) - Webhook: ${webhookStatus}`);
 
-    // Automatically sync initial conversations & messages from Meta in background
+    // Auto-sync initial conversations in background
     syncSinglePageChats(targetPage.id || targetPage.pageId, pageAccessToken, targetPage.name).catch((syncErr) => {
       console.warn('[Facebook Page Connect] Initial sync error:', syncErr.message);
     });
 
-    // Return sanitized page (no token)
     res.json({
       success: true,
       message: `Facebook Page "${targetPage.name}" connected successfully!`,
@@ -414,13 +405,11 @@ router.post('/disconnect-page', async (req, res) => {
     const { pageId, workspaceId = 'default_workspace' } = req.body;
     if (!pageId) return res.status(400).json({ success: false, error: 'pageId is required' });
 
-    // Look up page to get access token for webhook unsubscribe
     const page = await getPageByPageId(pageId, true);
     if (page && page.accessToken) {
       await unsubscribePageFromWebhooks(pageId, page.accessToken);
     }
 
-    // Disconnect in DB
     await disconnectPage(pageId, workspaceId);
 
     console.log(`[Facebook Page Disconnected] Page ID: ${pageId}`);
@@ -459,20 +448,30 @@ router.get('/webhook', (req, res) => {
     return res.status(200).send(challenge);
   }
 
-  console.warn('[Meta Webhook Verification Failed] Incorrect verify token:', token);
+  console.warn('[Meta Webhook Verification Failed] Incorrect verify token');
   return res.sendStatus(403);
 });
 
 /**
  * POST /api/integrations/facebook/webhook
  * Receives Meta Messenger (Facebook + Instagram DM) webhook events
+ * Enforces x-hub-signature-256 verification
  */
 router.post('/webhook', async (req, res) => {
   try {
-    // 1. Verify webhook signature if present (log warning only, do not reject)
     const sigHeader = req.headers['x-hub-signature-256'];
-    if (sigHeader && !verifyWebhookSignature(sigHeader, req.rawBody || req.body)) {
-      console.warn('[Meta Webhook] Signature verification warning, proceeding with event');
+    const rawPayload = req.rawBody || req.body;
+
+    // Enforce webhook signature verification in production
+    if (process.env.META_APP_SECRET) {
+      if (!sigHeader) {
+        console.warn('[Meta Webhook] Signature header missing. Rejecting.');
+        return res.status(401).json({ error: 'Signature header missing' });
+      }
+      if (!verifyWebhookSignature(sigHeader, rawPayload)) {
+        console.warn('[Meta Webhook] Invalid signature verification. Rejecting.');
+        return res.status(403).json({ error: 'Invalid webhook signature' });
+      }
     }
 
     const body = req.body;
@@ -492,7 +491,7 @@ router.post('/webhook', async (req, res) => {
             const messageText = message.text;
             const attachments = message.attachments;
 
-            // Idempotency check
+            // Idempotency check: prevent duplicate messages
             if (messageId) {
               const { data: existingMsg } = await supabase
                 .from('messages')
@@ -567,7 +566,7 @@ router.post('/webhook', async (req, res) => {
     // ── Instagram DM Events ───────────────────────────────────────────────
     if (body.object === 'instagram') {
       for (const entry of body.entry || []) {
-        const igPageId = entry.id; // This is the Instagram Business Account ID (igUserId)
+        const igPageId = entry.id; // Instagram Business Account ID
 
         for (const event of entry.messaging || []) {
           const senderId = event.sender?.id;
@@ -578,7 +577,7 @@ router.post('/webhook', async (req, res) => {
             const messageText = message.text;
             const attachments = message.attachments;
 
-            // Idempotency check
+            // Idempotency check: prevent duplicate messages
             if (messageId) {
               const { data: existingMsg } = await supabase
                 .from('messages')
@@ -592,31 +591,41 @@ router.post('/webhook', async (req, res) => {
               }
             }
 
-            // Bug Fix: Meta sends entry.id as the Instagram Business Account ID (igUserId)
-            // We save the connected account as ig_{igUserId}, so look up with that key.
-            // Also try ig_{igPageId} as fallback in case it was saved differently.
+            // Look up connected Instagram account by igPageId or ig_{igPageId}
             let connectedIgPage = await getPageByPageId(`ig_${igPageId}`, true);
             if (!connectedIgPage) {
-              // Fallback: search all connected pages for one whose metadata links this IG account
+              connectedIgPage = await getPageByPageId(igPageId, true);
+            }
+            if (!connectedIgPage) {
               const { data: allPages } = await supabase
-                .from('connected_pages')
+                .from('facebook_pages')
                 .select('*')
                 .ilike('page_id', 'ig_%')
                 .eq('status', 'connected')
-                .limit(10);
+                .limit(5);
               if (allPages?.length) {
-                connectedIgPage = allPages[0]; // use first available IG account as fallback
-                console.warn(`[Instagram DM] Using fallback IG account: ${connectedIgPage.page_id}`);
+                connectedIgPage = allPages[0];
               }
             }
 
             const igAccountName = connectedIgPage?.name || `@instagram_${igPageId.slice(-4)}`;
+            const pageAccessToken = connectedIgPage?.accessToken || connectedIgPage?.access_token;
 
-            console.log(`[Instagram DM] From IG User: ${senderId} — "${messageText || '[Attachment]'}"`);
+            // Retrieve Instagram sender profile if pageAccessToken is available
+            let customerName = `Instagram User ${senderId.slice(-4)}`;
+            let customerAvatar = null;
+            if (pageAccessToken) {
+              const profile = await getInstagramUserProfile(senderId, pageAccessToken);
+              if (profile.username) customerName = `@${profile.username}`;
+              else if (profile.name) customerName = profile.name;
+              if (profile.profilePic) customerAvatar = profile.profilePic;
+            }
+
+            console.log(`[Instagram DM] From: ${customerName} (${senderId}) — "${messageText || '[Attachment]'}"`);
 
             const contact = await upsertContact({
               phoneNumber: `ig_${senderId}`,
-              name: `Instagram User ${senderId.slice(-4)}`,
+              name: customerName,
               channel: 'instagram',
               tags: ['Instagram DM', igAccountName],
               metadata: {
@@ -624,6 +633,7 @@ router.post('/webhook', async (req, res) => {
                 igPageId,
                 igAccountName,
                 senderType: 'instagram',
+                ...(customerAvatar ? { profilePic: customerAvatar } : {}),
               },
             });
 
@@ -665,7 +675,7 @@ router.post('/webhook', async (req, res) => {
 
 /**
  * POST /api/integrations/facebook/send-message
- * Send a direct reply to a Facebook Messenger customer (used by agent inbox)
+ * Send a direct reply to a Facebook Messenger customer
  */
 router.post('/send-message', async (req, res) => {
   try {
@@ -675,14 +685,13 @@ router.post('/send-message', async (req, res) => {
       return res.status(400).json({ success: false, error: 'recipientPsid and text are required' });
     }
 
-    // Look up page access token
     let page = null;
     if (pageId) {
       page = await getPageByPageId(pageId, true);
     }
     if (!page || !page.accessToken) {
       const pages = await getConnectedPages(null, true);
-      page = pages.find((p) => p.accessToken);
+      page = pages.find((p) => p.accessToken && !p.pageId?.startsWith('ig_'));
     }
 
     if (!page || !page.accessToken) {
@@ -713,7 +722,7 @@ router.post('/send-message', async (req, res) => {
 
 /**
  * GET /api/integrations/facebook/instagram/oauth/start
- * Starts Instagram DM OAuth flow (requires instagram_manage_messages permission)
+ * Starts Instagram DM OAuth flow
  */
 router.get('/instagram/oauth/start', async (req, res) => {
   try {
@@ -778,16 +787,13 @@ router.get('/instagram/oauth/callback', async (req, res) => {
   }
 
   try {
-    // Exchange code for tokens
     const redirectUri = session.redirectUri || getRedirectUri(req);
     const tokenData = await exchangeCodeForTokens(code, redirectUri);
     const userAccessToken = tokenData.userAccessToken;
 
-    // Fetch Instagram accounts linked to Facebook Pages
     const igAccounts = await getInstagramAccounts(userAccessToken);
     console.log(`[Instagram OAuth] Authorized. Found ${igAccounts.length} Instagram account(s).`);
 
-    // Store in session
     await saveOAuthSession(state, {
       ...session,
       igAccounts,
@@ -841,7 +847,7 @@ router.get('/instagram/oauth/callback', async (req, res) => {
 
 /**
  * GET /api/integrations/facebook/instagram/accounts
- * List Instagram accounts available after OAuth
+ * List Instagram accounts available from active OAuth session
  */
 router.get('/instagram/accounts', async (req, res) => {
   try {
@@ -884,7 +890,6 @@ router.post('/instagram/connect-account', async (req, res) => {
       return res.status(400).json({ success: false, error: 'igUserId is required' });
     }
 
-    // Get from OAuth session
     let targetAccount = null;
     if (state) {
       const session = await getOAuthSession(state);
@@ -900,8 +905,15 @@ router.post('/instagram/connect-account', async (req, res) => {
       });
     }
 
-    // Save as a connected page (channel: instagram) using existing facebookDb
-    const saved = await saveConnectedPage({
+    // Subscribe linked Facebook Page to Instagram DM webhooks
+    const subRes = await subscribeInstagramWebhooks(
+      targetAccount.linkedPageId,
+      targetAccount.pageAccessToken
+    );
+    const webhookStatus = subRes.success ? 'subscribed' : 'webhook_pending';
+
+    // Save as connected page with structured metadata and explicit linking columns
+    await saveConnectedPage({
       pageId: `ig_${targetAccount.igUserId}`,
       pageName: `@${targetAccount.igUsername}`,
       category: 'Instagram',
@@ -910,24 +922,16 @@ router.post('/instagram/connect-account', async (req, res) => {
       userId,
       workspaceId,
       status: 'connected',
-      webhookStatus: 'subscribing',
-    });
-
-    // Subscribe linked Facebook Page to Instagram DM webhooks
-    const subRes = await subscribeInstagramWebhooks(
-      targetAccount.linkedPageId,
-      targetAccount.pageAccessToken
-    );
-    const webhookStatus = subRes.success ? 'subscribed' : 'webhook_pending';
-
-    // Update webhook status
-    await saveConnectedPage({
-      pageId: `ig_${targetAccount.igUserId}`,
-      pageName: `@${targetAccount.igUsername}`,
-      accessToken: targetAccount.pageAccessToken,
-      workspaceId,
-      status: 'connected',
       webhookStatus,
+      linkedPageId: targetAccount.linkedPageId,
+      instagramBusinessAccountId: targetAccount.igUserId,
+      metadata: {
+        igUserId: targetAccount.igUserId,
+        igUsername: targetAccount.igUsername,
+        linkedPageId: targetAccount.linkedPageId,
+        linkedPageName: targetAccount.linkedPageName,
+        connectedVia: 'meta_oauth',
+      },
     });
 
     console.log(`[Instagram Connected] @${targetAccount.igUsername} (IG ID: ${targetAccount.igUserId}) - Webhook: ${webhookStatus}`);
@@ -948,6 +952,7 @@ router.post('/instagram/connect-account', async (req, res) => {
         igUsername: targetAccount.igUsername,
         igProfilePicture: targetAccount.igProfilePicture,
         linkedPageName: targetAccount.linkedPageName,
+        linkedPageId: targetAccount.linkedPageId,
         connected: true,
         webhookStatus,
       },
@@ -966,11 +971,12 @@ router.post('/instagram/sync-chats', async (req, res) => {
   try {
     const { igUserId } = req.body;
     let targetPage = null;
+
     if (igUserId) {
       targetPage = await getPageByPageId(`ig_${igUserId}`, true);
     } else {
       const { data: pages } = await supabase
-        .from('connected_pages')
+        .from('facebook_pages')
         .select('*')
         .ilike('page_id', 'ig_%')
         .eq('status', 'connected')
@@ -978,17 +984,33 @@ router.post('/instagram/sync-chats', async (req, res) => {
       targetPage = pages?.[0];
     }
 
-    if (!targetPage?.accessToken) {
+    if (!targetPage?.accessToken && !targetPage?.access_token) {
       return res.status(404).json({ success: false, error: 'No connected Instagram account found' });
     }
 
-    const linkedPageId = targetPage.metadata?.linkedPageId || targetPage.page_id.replace('ig_', '');
-    const igId = targetPage.page_id.replace('ig_', '');
+    const token = targetPage.accessToken || targetPage.access_token;
+    const igId = targetPage.instagram_business_account_id || targetPage.metadata?.igUserId || targetPage.page_id.replace(/^ig_/, '');
+    
+    // Resolve linked Facebook Page ID safely without stripping 'ig_'
+    let linkedPageId = targetPage.linked_page_id || targetPage.metadata?.linkedPageId;
+    if (!linkedPageId) {
+      // Find connected Facebook Page in facebook_pages
+      const { data: fbPages } = await supabase
+        .from('facebook_pages')
+        .select('*')
+        .not('page_id', 'ilike', 'ig_%')
+        .eq('status', 'connected')
+        .limit(1);
+      if (fbPages?.[0]?.page_id) {
+        linkedPageId = fbPages[0].page_id;
+      }
+    }
+
     const result = await syncInstagramChats(
       linkedPageId,
-      targetPage.accessToken,
+      token,
       igId,
-      targetPage.name || 'instagram'
+      targetPage.name || targetPage.page_name || 'instagram'
     );
 
     res.json({ success: true, ...result });
@@ -997,96 +1019,6 @@ router.post('/instagram/sync-chats', async (req, res) => {
     res.status(500).json({ success: false, error: err.message });
   }
 });
-
-/**
- * Sync historical Instagram Direct chats for a connected account
- */
-export async function syncInstagramChats(linkedPageId, pageAccessToken, igUserId, igUsername) {
-  try {
-    console.log(`[Instagram Sync] Starting sync for @${igUsername} | igUserId=${igUserId} | linkedPageId=${linkedPageId}`);
-
-    // Instagram DMs API: Use /{ig-user-id}/conversations?platform=instagram
-    // OR /{page-id}/conversations?platform=instagram (both work if token has instagram_manage_messages)
-    let conversations = [];
-    let syncError = null;
-
-    // Try primary: call on igUserId directly
-    try {
-      conversations = await fetchPageConversations(igUserId, pageAccessToken, 'instagram');
-      console.log(`[Instagram Sync] Using igUserId endpoint. Found ${conversations.length} conversation(s).`);
-    } catch (primaryErr) {
-      console.warn(`[Instagram Sync] igUserId endpoint failed: ${primaryErr.response?.data?.error?.message || primaryErr.message}`);
-      // Fallback: try on linkedPageId
-      try {
-        conversations = await fetchPageConversations(linkedPageId, pageAccessToken, 'instagram');
-        console.log(`[Instagram Sync] Using linkedPageId endpoint. Found ${conversations.length} conversation(s).`);
-      } catch (fallbackErr) {
-        syncError = fallbackErr.response?.data?.error?.message || fallbackErr.message;
-        console.error(`[Instagram Sync] Both endpoints failed. Error: ${syncError}`);
-        return { success: false, error: syncError, count: 0 };
-      }
-    }
-
-    let totalMessages = 0;
-    for (const conv of conversations) {
-      const participants = conv.participants?.data || [];
-      const customer = participants.find(
-        (p) => String(p.id) !== String(igUserId) && String(p.id) !== String(linkedPageId)
-      );
-      if (!customer?.id) continue;
-
-      const customerId = String(customer.id);
-      const customerName = customer.username || customer.name || `Instagram User ${customerId.slice(-4)}`;
-
-      const contact = await upsertContact({
-        phoneNumber: `ig_${customerId}`,
-        name: customerName,
-        channel: 'instagram',
-        tags: ['Instagram DM', `@${igUsername}`],
-        metadata: {
-          igUserId: customerId,
-          igPageId: igUserId,
-          igAccountName: `@${igUsername}`,
-          senderType: 'instagram',
-        },
-      });
-
-      if (!contact) continue;
-
-      const messages = (conv.messages?.data || []).slice().reverse();
-      for (const msg of messages) {
-        if (!msg.id) continue;
-
-        // Skip if already in database
-        const { data: existing } = await supabase
-          .from('messages')
-          .select('id')
-          .eq('whatsapp_message_id', msg.id)
-          .maybeSingle();
-
-        if (existing) continue;
-
-        const isCustomer = String(msg.from?.id) === customerId;
-        await saveMessage({
-          contactId: contact.id,
-          phoneNumber: `ig_${customerId}`,
-          direction: isCustomer ? 'inbound' : 'outbound',
-          messageType: 'text',
-          content: msg.message || '[Instagram Message]',
-          whatsappMessageId: msg.id,
-          status: 'delivered',
-        });
-        totalMessages++;
-      }
-    }
-    console.log(`[Instagram Sync Complete] Synced ${totalMessages} historical messages for @${igUsername}`);
-    return { success: true, count: totalMessages };
-  } catch (err) {
-    const errDetail = err.response?.data?.error?.message || err.message;
-    console.error(`[Instagram Sync Error]:`, errDetail);
-    return { success: false, error: errDetail };
-  }
-}
 
 /**
  * POST /api/integrations/facebook/instagram/send-message
@@ -1100,7 +1032,6 @@ router.post('/instagram/send-message', async (req, res) => {
       return res.status(400).json({ success: false, error: 'recipientIgUserId and text are required' });
     }
 
-    // Look up the page access token for this Instagram account
     let page = null;
     if (igUserId) {
       page = await getPageByPageId(`ig_${igUserId}`, true);
@@ -1133,17 +1064,220 @@ router.post('/instagram/send-message', async (req, res) => {
 });
 
 /**
- * Helper to sync conversations and messages from Meta Graph API for a Page
+ * GET /api/integrations/facebook/import/preview
+ * Safe preview of available historical chats before running an import
+ */
+router.get('/import/preview', async (req, res) => {
+  try {
+    const { platform = 'facebook', pageId } = req.query;
+
+    let targetPage = null;
+    if (platform === 'instagram') {
+      const pages = await getConnectedPages(null, true);
+      targetPage = pageId ? pages.find((p) => p.pageId === pageId || p.pageId === `ig_${pageId}`) : pages.find((p) => p.pageId?.startsWith('ig_'));
+    } else {
+      targetPage = pageId ? await getPageByPageId(pageId, true) : (await getConnectedPages(null, true)).find((p) => !p.pageId?.startsWith('ig_'));
+    }
+
+    if (!targetPage?.accessToken) {
+      return res.status(404).json({
+        success: false,
+        error: `No connected ${platform} account with active token found.`,
+      });
+    }
+
+    const token = targetPage.accessToken;
+    const queryId = platform === 'instagram' ? (targetPage.linkedPageId || targetPage.pageId.replace(/^ig_/, '')) : targetPage.pageId;
+
+    let conversations = [];
+    try {
+      conversations = await fetchPageConversations(queryId, token, platform === 'instagram' ? 'instagram' : null, 1);
+    } catch (apiErr) {
+      return res.json({
+        success: false,
+        platform,
+        eligible: false,
+        error: apiErr.response?.data?.error?.message || apiErr.message,
+        limitations: 'Meta Graph API conversations access requires pages_messaging and instagram_manage_messages permissions. In Dev mode, only app testers/admins can be accessed.',
+      });
+    }
+
+    let sampleMessagesCount = 0;
+    for (const c of conversations) {
+      sampleMessagesCount += (c.messages?.data?.length || 0);
+    }
+
+    res.json({
+      success: true,
+      platform,
+      eligible: true,
+      conversationsCount: conversations.length,
+      sampleMessagesCount,
+      accountName: targetPage.name,
+      limitations: platform === 'instagram' 
+        ? 'Meta only provides historical Instagram messages if instagram_manage_messages is approved or the account is an authorized tester in development mode.'
+        : 'Meta limits historical Messenger conversations to pages managed by the user with pages_messaging permission.',
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+/**
+ * POST /api/integrations/facebook/import/execute
+ * Resumable, duplicate-safe historical import
+ */
+router.post('/import/execute', async (req, res) => {
+  try {
+    const { platform = 'facebook', pageId } = req.body;
+
+    if (platform === 'instagram') {
+      const pages = await getConnectedPages(null, true);
+      const targetPage = pageId ? pages.find((p) => p.pageId === pageId || p.pageId === `ig_${pageId}`) : pages.find((p) => p.pageId?.startsWith('ig_'));
+      if (!targetPage?.accessToken) {
+        return res.status(404).json({ success: false, error: 'No connected Instagram account found' });
+      }
+      const igId = targetPage.instagramBusinessAccountId || targetPage.metadata?.igUserId || targetPage.pageId.replace(/^ig_/, '');
+      const result = await syncInstagramChats(targetPage.linkedPageId, targetPage.accessToken, igId, targetPage.name);
+      return res.json({ success: true, platform: 'instagram', ...result });
+    } else {
+      const targetPage = pageId ? await getPageByPageId(pageId, true) : (await getConnectedPages(null, true)).find((p) => !p.pageId?.startsWith('ig_'));
+      if (!targetPage?.accessToken) {
+        return res.status(404).json({ success: false, error: 'No connected Facebook Page found' });
+      }
+      const result = await syncSinglePageChats(targetPage.pageId, targetPage.accessToken, targetPage.name);
+      return res.json({ success: true, platform: 'facebook', ...result });
+    }
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+/**
+ * Sync historical Instagram Direct chats for a connected account
+ */
+export async function syncInstagramChats(linkedPageId, pageAccessToken, igUserId, igUsername) {
+  try {
+    console.log(`[Instagram Sync] Starting sync for @${igUsername} | igUserId=${igUserId} | linkedPageId=${linkedPageId}`);
+
+    let conversations = [];
+    let syncError = null;
+
+    // 1. Try /{page-id}/conversations?platform=instagram (standard Messenger Platform for IG)
+    if (linkedPageId) {
+      try {
+        conversations = await fetchPageConversations(linkedPageId, pageAccessToken, 'instagram', 3);
+        console.log(`[Instagram Sync] Using linkedPageId (${linkedPageId}) endpoint. Found ${conversations.length} conversation(s).`);
+      } catch (e) {
+        console.warn(`[Instagram Sync] linkedPageId endpoint failed:`, e.response?.data?.error?.message || e.message);
+      }
+    }
+
+    // 2. Fallback: try on igUserId directly
+    if (conversations.length === 0 && igUserId) {
+      try {
+        conversations = await fetchPageConversations(igUserId, pageAccessToken, 'instagram', 3);
+        console.log(`[Instagram Sync] Using igUserId (${igUserId}) endpoint. Found ${conversations.length} conversation(s).`);
+      } catch (fallbackErr) {
+        syncError = fallbackErr.response?.data?.error?.message || fallbackErr.message;
+      }
+    }
+
+    if (conversations.length === 0 && syncError) {
+      console.warn(`[Instagram Sync] Meta API error during sync: ${syncError}`);
+      return { success: false, error: syncError, count: 0, skipped: 0 };
+    }
+
+    let totalMessages = 0;
+    let skippedDuplicates = 0;
+
+    for (const conv of conversations) {
+      const participants = conv.participants?.data || [];
+      const customer = participants.find(
+        (p) => String(p.id) !== String(igUserId) && (!linkedPageId || String(p.id) !== String(linkedPageId))
+      );
+      if (!customer?.id) continue;
+
+      const customerId = String(customer.id);
+      const customerName = customer.username || customer.name || `Instagram User ${customerId.slice(-4)}`;
+
+      const contact = await upsertContact({
+        phoneNumber: `ig_${customerId}`,
+        name: customerName,
+        channel: 'instagram',
+        tags: ['Instagram DM', `@${igUsername}`],
+        metadata: {
+          igUserId: customerId,
+          igPageId: igUserId,
+          igAccountName: `@${igUsername}`,
+          senderType: 'instagram',
+        },
+        updateTimestamp: false,
+      });
+
+      if (!contact) continue;
+
+      const messages = (conv.messages?.data || []).slice().reverse();
+      let hasNewMessage = false;
+
+      for (const msg of messages) {
+        if (!msg.id) continue;
+
+        // Duplicate check via unique message ID
+        const { data: existing } = await supabase
+          .from('messages')
+          .select('id')
+          .eq('whatsapp_message_id', msg.id)
+          .maybeSingle();
+
+        if (existing) {
+          skippedDuplicates++;
+          continue;
+        }
+
+        const isCustomer = String(msg.from?.id) === customerId;
+        await saveMessage({
+          contactId: contact.id,
+          phoneNumber: `ig_${customerId}`,
+          direction: isCustomer ? 'inbound' : 'outbound',
+          messageType: 'text',
+          content: msg.message || '[Instagram Message]',
+          whatsappMessageId: msg.id,
+          status: 'delivered',
+        });
+        totalMessages++;
+        hasNewMessage = true;
+      }
+
+      if (hasNewMessage) {
+        await supabase
+          .from('contacts')
+          .update({ last_interaction_at: new Date().toISOString() })
+          .eq('id', contact.id);
+      }
+    }
+
+    console.log(`[Instagram Sync Complete] Synced ${totalMessages} historical message(s), skipped ${skippedDuplicates} duplicates.`);
+    return { success: true, count: totalMessages, skipped: skippedDuplicates };
+  } catch (err) {
+    const errDetail = err.response?.data?.error?.message || err.message;
+    console.error(`[Instagram Sync Error]:`, errDetail);
+    return { success: false, error: errDetail, count: 0 };
+  }
+}
+
+/**
+ * Helper to sync conversations and messages from Meta Graph API for a Facebook Page
  */
 export async function syncSinglePageChats(pageId, pageAccessToken, pageName = 'Facebook Page') {
   try {
-    // Resolve real page name from DB if not provided properly
     const resolvedPageName = (!pageName || pageName === 'undefined' || pageName === 'Facebook Page')
       ? 'Omniconnect'
       : pageName;
 
-    const conversations = await fetchPageConversations(pageId, pageAccessToken);
+    const conversations = await fetchPageConversations(pageId, pageAccessToken, null, 3);
     let syncedCount = 0;
+    let skippedDuplicates = 0;
 
     for (const conv of conversations) {
       const participants = conv.participants?.data || [];
@@ -1153,27 +1287,11 @@ export async function syncSinglePageChats(pageId, pageAccessToken, pageName = 'F
       const customerId = String(customer.id);
       const customerName = customer.name || `Facebook User ${customerId.slice(-4)}`;
 
-      // Try to fetch customer profile picture via participants/picture endpoint
       let profilePicUrl = null;
       try {
-        const { default: axios } = await import('axios');
-        const picRes = await axios.get(
-          `https://graph.facebook.com/v19.0/${pageId}/conversations`,
-          {
-            params: {
-              fields: `participants{id,name,pic}`,
-              user_id: customerId,
-              access_token: pageAccessToken,
-            },
-            timeout: 4000,
-          }
-        );
-        const convParticipants = picRes.data?.data?.[0]?.participants?.data || [];
-        const customerPart = convParticipants.find((p) => String(p.id) === customerId);
-        if (customerPart?.pic) profilePicUrl = customerPart.pic;
-      } catch (_) {
-        // Profile pic not available in dev mode — silently ignore
-      }
+        const profile = await getCustomerProfile(customerId, pageAccessToken);
+        if (profile?.profilePic) profilePicUrl = profile.profilePic;
+      } catch (_) {}
 
       const contact = await upsertContact({
         phoneNumber: `fb_${customerId}`,
@@ -1186,24 +1304,27 @@ export async function syncSinglePageChats(pageId, pageAccessToken, pageName = 'F
           senderPsid: customerId,
           ...(profilePicUrl ? { profilePic: profilePicUrl } : {}),
         },
-        updateTimestamp: false, // Don't bump last_interaction_at unless new msg saved below
+        updateTimestamp: false,
       });
 
       if (!contact) continue;
 
-      const messages = (conv.messages?.data || []).slice().reverse(); // oldest first
+      const messages = (conv.messages?.data || []).slice().reverse();
       let newMsgSaved = false;
+
       for (const msg of messages) {
         if (!msg.id) continue;
 
-        // Check if message already exists
         const { data: existingMsg } = await supabase
           .from('messages')
           .select('id')
           .eq('whatsapp_message_id', msg.id)
           .maybeSingle();
 
-        if (existingMsg) continue;
+        if (existingMsg) {
+          skippedDuplicates++;
+          continue;
+        }
 
         const isFromCustomer = String(msg.from?.id) === customerId;
         await saveMessage({
@@ -1219,27 +1340,25 @@ export async function syncSinglePageChats(pageId, pageAccessToken, pageName = 'F
         newMsgSaved = true;
       }
 
-      // Only bump last_interaction_at when a real new message was saved
       if (newMsgSaved) {
         await supabase
           .from('contacts')
           .update({ last_interaction_at: new Date().toISOString() })
           .eq('id', contact.id);
       }
-
     }
 
-    console.log(`[Facebook Sync] Synced ${syncedCount} message(s) for page "${resolvedPageName}" (${pageId})`);
-    return { success: true, syncedCount };
+    console.log(`[Facebook Sync] Synced ${syncedCount} message(s), skipped ${skippedDuplicates} duplicates for "${resolvedPageName}"`);
+    return { success: true, syncedCount, skippedDuplicates };
   } catch (err) {
     console.error(`[Facebook Sync Error] Page ${pageId}:`, err.message);
-    return { success: false, error: err.message };
+    return { success: false, error: err.message, syncedCount: 0 };
   }
 }
 
 /**
  * POST /api/integrations/facebook/sync
- * Manually or automatically trigger sync of existing chats from Meta Graph API
+ * Manually trigger sync of existing chats from Meta Graph API
  */
 router.all('/sync', async (req, res) => {
   try {
@@ -1263,11 +1382,17 @@ router.all('/sync', async (req, res) => {
 
     for (const page of pagesToSync) {
       if (!page.accessToken) continue;
-      const r = await syncSinglePageChats(page.pageId || page.id, page.accessToken, page.name || page.pageName);
-      if (r.success) {
-        totalSynced += r.syncedCount || 0;
+      // Handle Instagram account sync vs Facebook Page sync
+      if (page.pageId?.startsWith('ig_')) {
+        const igId = page.instagramBusinessAccountId || page.metadata?.igUserId || page.pageId.replace(/^ig_/, '');
+        const r = await syncInstagramChats(page.linkedPageId, page.accessToken, igId, page.name);
+        if (r.success) totalSynced += (r.count || 0);
+        results.push({ pageId: page.pageId, pageName: page.name, ...r });
+      } else {
+        const r = await syncSinglePageChats(page.pageId || page.id, page.accessToken, page.name || page.pageName);
+        if (r.success) totalSynced += (r.syncedCount || 0);
+        results.push({ pageId: page.pageId || page.id, pageName: page.name, ...r });
       }
-      results.push({ pageId: page.pageId || page.id, pageName: page.name, ...r });
     }
 
     res.json({
