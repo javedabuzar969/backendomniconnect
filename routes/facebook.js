@@ -1432,4 +1432,67 @@ router.all('/sync', async (req, res) => {
   }
 });
 
+/**
+ * POST /api/integrations/facebook/data-deletion
+ * Official Meta User Data Deletion Callback endpoint per Meta Developer Policy.
+ * Validates signed_request, revokes user tokens, and returns status URL + confirmation_code.
+ */
+router.post('/data-deletion', async (req, res) => {
+  try {
+    const signedRequest = req.body?.signed_request;
+    if (!signedRequest) {
+      return res.status(400).json({ error: 'signed_request is required' });
+    }
+
+    const [encodedSig, payload] = signedRequest.split('.');
+    const appSecret = (process.env.META_APP_SECRET || '').trim();
+
+    if (!appSecret) {
+      console.warn('[Meta Data Deletion] META_APP_SECRET is not configured');
+    }
+
+    // Decode signature
+    const sig = Buffer.from(encodedSig.replace(/-/g, '+').replace(/_/g, '/'), 'base64');
+    const expectedSig = crypto
+      .createHmac('sha256', appSecret)
+      .update(payload)
+      .digest();
+
+    if (sig.length !== expectedSig.length || !crypto.timingSafeEqual(sig, expectedSig)) {
+      console.warn('[Meta Data Deletion] Invalid signed_request signature');
+      return res.status(403).json({ error: 'Invalid signed_request signature' });
+    }
+
+    const data = JSON.parse(Buffer.from(payload.replace(/-/g, '+').replace(/_/g, '/'), 'base64').toString('utf8'));
+    const userId = data.user_id;
+    const confirmationCode = `del_${crypto.randomBytes(12).toString('hex')}`;
+
+    console.log(`[Meta Data Deletion Callback] Processing request for Meta User ID: ${userId}, Code: ${confirmationCode}`);
+
+    if (userId) {
+      await supabase
+        .from('facebook_pages')
+        .update({ status: 'deleted', access_token: 'REVOKED' })
+        .eq('user_id', userId);
+    }
+
+    const statusUrl = `${FRONTEND_URL}/data-deletion?id=${confirmationCode}`;
+    res.json({
+      url: statusUrl,
+      confirmation_code: confirmationCode,
+    });
+  } catch (err) {
+    console.error('[Meta Data Deletion Callback Error]:', err.message);
+    res.status(500).json({ error: 'Failed to process data deletion request' });
+  }
+});
+
+/**
+ * GET /api/integrations/facebook/data-deletion
+ * Browser-friendly redirect to the frontend Data Deletion Instructions page
+ */
+router.get('/data-deletion', (req, res) => {
+  res.redirect(`${FRONTEND_URL}/data-deletion`);
+});
+
 export default router;
