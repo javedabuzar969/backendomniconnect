@@ -17,6 +17,7 @@ import {
   sendMessengerText,
   sendInstagramDM,
   fetchPageConversations,
+  fetchInstagramConversations,
 } from '../lib/metaGraph.js';
 import {
   saveConnectedPage,
@@ -28,6 +29,7 @@ import {
   clearOAuthSession,
 } from '../lib/facebookDb.js';
 import { supabase, upsertContact, saveMessage, updateMessageStatusByWamid } from '../lib/supabase.js';
+import { requireAuth } from './auth.js';
 
 const router = Router();
 
@@ -266,9 +268,10 @@ router.get('/oauth/callback', async (req, res) => {
  * GET /api/integrations/facebook/pages
  * Retrieves connected Facebook Pages and/or available Pages from an active Meta OAuth session
  */
-router.get('/pages', async (req, res) => {
+router.get('/pages', requireAuth, async (req, res) => {
   try {
-    const { state, workspaceId = 'default_workspace' } = req.query;
+    const { state } = req.query;
+    const workspaceId = req.workspaceId || 'default_workspace';
 
     const connectedPages = await getConnectedPages(workspaceId, false);
 
@@ -311,9 +314,11 @@ router.get('/pages', async (req, res) => {
  * POST /api/integrations/facebook/connect-page
  * Connects a selected real Facebook Page and subscribes it to Messenger webhooks
  */
-router.post('/connect-page', async (req, res) => {
+router.post('/connect-page', requireAuth, async (req, res) => {
   try {
-    const { pageId, state, workspaceId = 'default_workspace', userId = null } = req.body;
+    const { pageId, state } = req.body;
+    const workspaceId = req.workspaceId || 'default_workspace';
+    const userId = req.userId || null;
 
     if (!pageId) {
       return res.status(400).json({ success: false, error: 'pageId is required' });
@@ -400,9 +405,10 @@ router.post('/connect-page', async (req, res) => {
  * POST /api/integrations/facebook/disconnect-page
  * Disconnects a Facebook Page and unsubscribes from webhook events
  */
-router.post('/disconnect-page', async (req, res) => {
+router.post('/disconnect-page', requireAuth, async (req, res) => {
   try {
-    const { pageId, workspaceId = 'default_workspace' } = req.body;
+    const { pageId } = req.body;
+    const workspaceId = req.workspaceId || 'default_workspace';
     if (!pageId) return res.status(400).json({ success: false, error: 'pageId is required' });
 
     const page = await getPageByPageId(pageId, true);
@@ -475,20 +481,16 @@ router.post('/webhook', async (req, res) => {
       });
     } catch (_) {}
 
-    // Signature verification with graceful fallback for Vercel Serverless
-    let isSigValid = true;
-    if (process.env.META_APP_SECRET && sigHeader) {
-      isSigValid = verifyWebhookSignature(sigHeader, rawPayload);
-      if (!isSigValid) {
-        console.warn('[Meta Webhook] Signature check mismatch (likely Vercel rawBody unbuffering).');
-        if (process.env.ENFORCE_STRICT_WEBHOOK_SIGNATURE === 'true') {
-          return res.status(403).json({ error: 'Invalid webhook signature' });
-        }
-      }
-    } else if (process.env.META_APP_SECRET && !sigHeader) {
-      console.warn('[Meta Webhook] Missing x-hub-signature-256 header.');
-      if (process.env.ENFORCE_STRICT_WEBHOOK_SIGNATURE === 'true') {
+    // Signature verification using raw request body and Meta App Secret
+    if (process.env.META_APP_SECRET) {
+      if (!sigHeader) {
+        console.warn('[Meta Webhook] Missing x-hub-signature-256 header.');
         return res.status(401).json({ error: 'Signature header missing' });
+      }
+      const isSigValid = verifyWebhookSignature(sigHeader, rawPayload);
+      if (!isSigValid) {
+        console.warn('[Meta Webhook] Invalid webhook signature rejected.');
+        return res.status(403).json({ error: 'Invalid webhook signature' });
       }
     }
 
@@ -504,12 +506,13 @@ router.post('/webhook', async (req, res) => {
           const recipientId = event.recipient?.id;
           const message = event.message;
 
-          // Skip echo messages (messages sent by Page itself to customer)
-          if (message?.is_echo) {
-            continue;
-          }
+          const isEcho = Boolean(message?.is_echo);
+          const customerPsid = isEcho ? recipientId : senderId;
+          const direction = isEcho ? 'outbound' : 'inbound';
+          const status = isEcho ? 'sent' : 'delivered';
+          const originalTimestamp = event.timestamp ? new Date(event.timestamp).toISOString() : null;
 
-          if (senderId && message) {
+          if (customerPsid && message) {
             const messageId = message.mid;
             const messageText = message.text;
             const attachments = message.attachments;
@@ -528,27 +531,36 @@ router.post('/webhook', async (req, res) => {
               }
             }
 
-            const connectedPage = await getPageByPageId(pageId || recipientId, true);
+            const connectedPage = await getPageByPageId(pageId || (isEcho ? senderId : recipientId), true);
+            const pageWorkspaceId = connectedPage?.workspace_id || connectedPage?.workspaceId || null;
             const pageName = connectedPage?.name || 'Facebook Page';
             const pageAccessToken = connectedPage?.accessToken;
 
-            let customerName = `Facebook User ${senderId.slice(-4)}`;
+            let customerName = `Facebook User ${customerPsid.slice(-4)}`;
             let customerAvatar = null;
 
-            if (pageAccessToken) {
-              const profile = await getCustomerProfile(senderId, pageAccessToken);
-              if (profile.name) customerName = profile.name;
-              if (profile.profilePic) customerAvatar = profile.profilePic;
+            if (pageAccessToken && !isEcho) {
+              try {
+                const profile = await getCustomerProfile(customerPsid, pageAccessToken);
+                if (profile?.name) customerName = profile.name;
+                if (profile?.profilePic) customerAvatar = profile.profilePic;
+              } catch (_) {}
             }
 
-            console.log(`[Facebook Messenger] From: ${customerName} (${senderId}) — "${messageText || '[Attachment]'}"`);
+            console.log(`[Facebook Messenger] (${direction}) Customer: ${customerName} (${customerPsid}) — "${messageText || '[Attachment]'}"`);
 
             const contact = await upsertContact({
-              phoneNumber: `fb_${senderId}`,
+              phoneNumber: `fb_${customerPsid}`,
               name: customerName,
               channel: 'facebook',
+              workspaceId: pageWorkspaceId,
               tags: ['Facebook Lead', pageName],
-              metadata: { pageId: pageId || recipientId, pageName, profilePic: customerAvatar, senderPsid: senderId },
+              metadata: {
+                pageId: pageId || (isEcho ? senderId : recipientId),
+                pageName,
+                senderPsid: customerPsid,
+                ...(customerAvatar ? { profilePic: customerAvatar } : {}),
+              },
             });
 
             if (contact) {
@@ -560,13 +572,15 @@ router.post('/webhook', async (req, res) => {
               }
               await saveMessage({
                 contactId: contact.id,
-                phoneNumber: `fb_${senderId}`,
-                direction: 'inbound',
+                phoneNumber: `fb_${customerPsid}`,
+                direction,
                 messageType: messageType === 'text' ? 'text' : 'image',
                 content: displayContent,
                 whatsappMessageId: messageId || `fb_in_${Date.now()}`,
-                status: 'delivered',
+                status,
                 rawPayload: event,
+                createdAt: originalTimestamp,
+                workspaceId: pageWorkspaceId,
               });
             }
           }
@@ -599,6 +613,13 @@ router.post('/webhook', async (req, res) => {
             const messageId = message.mid;
             const messageText = message.text;
             const attachments = message.attachments;
+            const isEcho = Boolean(message.is_echo);
+            const customerId = isEcho ? event.recipient?.id : senderId;
+            const direction = isEcho ? 'outbound' : 'inbound';
+            const status = isEcho ? 'sent' : 'delivered';
+            const originalTimestamp = event.timestamp ? new Date(event.timestamp).toISOString() : null;
+
+            if (!customerId) continue;
 
             // Idempotency check: prevent duplicate messages
             if (messageId) {
@@ -633,26 +654,30 @@ router.post('/webhook', async (req, res) => {
 
             const igAccountName = connectedIgPage?.name || `@instagram_${igPageId.slice(-4)}`;
             const pageAccessToken = connectedIgPage?.accessToken || connectedIgPage?.access_token;
+            const igWorkspaceId = connectedIgPage?.workspace_id || connectedIgPage?.workspaceId || null;
 
-            // Retrieve Instagram sender profile if pageAccessToken is available
-            let customerName = `Instagram User ${senderId.slice(-4)}`;
+            // Retrieve Instagram sender profile if pageAccessToken is available and message is inbound
+            let customerName = `Instagram User ${customerId.slice(-4)}`;
             let customerAvatar = null;
-            if (pageAccessToken) {
-              const profile = await getInstagramUserProfile(senderId, pageAccessToken);
-              if (profile.username) customerName = `@${profile.username}`;
-              else if (profile.name) customerName = profile.name;
-              if (profile.profilePic) customerAvatar = profile.profilePic;
+            if (pageAccessToken && !isEcho) {
+              try {
+                const profile = await getInstagramUserProfile(customerId, pageAccessToken);
+                if (profile?.username) customerName = `@${profile.username}`;
+                else if (profile?.name) customerName = profile.name;
+                if (profile?.profilePic) customerAvatar = profile.profilePic;
+              } catch (_) {}
             }
 
-            console.log(`[Instagram DM] From: ${customerName} (${senderId}) — "${messageText || '[Attachment]'}"`);
+            console.log(`[Instagram DM] (${direction}) Customer: ${customerName} (${customerId}) — "${messageText || '[Attachment]'}"`);
 
             const contact = await upsertContact({
-              phoneNumber: `ig_${senderId}`,
+              phoneNumber: `ig_${customerId}`,
               name: customerName,
               channel: 'instagram',
+              workspaceId: igWorkspaceId,
               tags: ['Instagram DM', igAccountName],
               metadata: {
-                igUserId: senderId,
+                igUserId: customerId,
                 igPageId,
                 igAccountName,
                 senderType: 'instagram',
@@ -669,13 +694,15 @@ router.post('/webhook', async (req, res) => {
               }
               await saveMessage({
                 contactId: contact.id,
-                phoneNumber: `ig_${senderId}`,
-                direction: 'inbound',
+                phoneNumber: `ig_${customerId}`,
+                direction,
                 messageType: messageType === 'text' ? 'text' : 'image',
                 content: displayContent,
                 whatsappMessageId: messageId || `ig_in_${Date.now()}`,
-                status: 'delivered',
+                status,
                 rawPayload: event,
+                createdAt: originalTimestamp,
+                workspaceId: igWorkspaceId,
               });
             }
           }
@@ -700,7 +727,7 @@ router.post('/webhook', async (req, res) => {
  * POST /api/integrations/facebook/send-message
  * Send a direct reply to a Facebook Messenger customer
  */
-router.post('/send-message', async (req, res) => {
+router.post('/send-message', requireAuth, async (req, res) => {
   try {
     const { recipientPsid, text, pageId } = req.body;
 
@@ -872,7 +899,7 @@ router.get('/instagram/oauth/callback', async (req, res) => {
  * GET /api/integrations/facebook/instagram/accounts
  * List Instagram accounts available from active OAuth session
  */
-router.get('/instagram/accounts', async (req, res) => {
+router.get('/instagram/accounts', requireAuth, async (req, res) => {
   try {
     const { state } = req.query;
     let igAccounts = [];
@@ -905,9 +932,11 @@ router.get('/instagram/accounts', async (req, res) => {
  * POST /api/integrations/facebook/instagram/connect-account
  * Connect selected Instagram account and subscribe to webhooks
  */
-router.post('/instagram/connect-account', async (req, res) => {
+router.post('/instagram/connect-account', requireAuth, async (req, res) => {
   try {
-    const { igUserId, state, workspaceId = 'default_workspace', userId = null } = req.body;
+    const { igUserId, state } = req.body;
+    const workspaceId = req.workspaceId || 'default_workspace';
+    const userId = req.userId || null;
 
     if (!igUserId) {
       return res.status(400).json({ success: false, error: 'igUserId is required' });
@@ -1150,7 +1179,7 @@ router.get('/import/preview', async (req, res) => {
  * POST /api/integrations/facebook/import/execute
  * Resumable, duplicate-safe historical import
  */
-router.post('/import/execute', async (req, res) => {
+router.post('/import/execute', requireAuth, async (req, res) => {
   try {
     const { platform = 'facebook', pageId } = req.body;
 
@@ -1179,7 +1208,7 @@ router.post('/import/execute', async (req, res) => {
 /**
  * Sync historical Instagram Direct chats for a connected account
  */
-export async function syncInstagramChats(linkedPageId, pageAccessToken, igUserId, igUsername) {
+export async function syncInstagramChats(linkedPageId, pageAccessToken, igUserId, igUsername, { maxPages = 1 } = {}) {
   try {
     console.log(`[Instagram Sync] Starting sync for @${igUsername} | igUserId=${igUserId} | linkedPageId=${linkedPageId}`);
 
@@ -1190,7 +1219,7 @@ export async function syncInstagramChats(linkedPageId, pageAccessToken, igUserId
     let fetchedFromPage = false;
     if (linkedPageId) {
       try {
-        conversations = await fetchPageConversations(linkedPageId, pageAccessToken, 'instagram', 3);
+        conversations = await fetchPageConversations(linkedPageId, pageAccessToken, 'instagram', maxPages);
         console.log(`[Instagram Sync] Using linkedPageId (${linkedPageId}) endpoint. Found ${conversations.length} conversation(s).`);
         fetchedFromPage = true;
       } catch (e) {
@@ -1198,17 +1227,20 @@ export async function syncInstagramChats(linkedPageId, pageAccessToken, igUserId
       }
     }
 
-    // 2. Fallback: only if linkedPageId query threw an error (not when it returned 0 chats)
-    if (!fetchedFromPage && igUserId) {
+    // 2. Fallback: try /{igUserId}/conversations directly if linkedPageId failed or returned 0
+    if ((!fetchedFromPage || conversations.length === 0) && igUserId) {
       try {
-        conversations = await fetchPageConversations(igUserId, pageAccessToken, 'instagram', 3);
-        console.log(`[Instagram Sync] Using igUserId (${igUserId}) endpoint. Found ${conversations.length} conversation(s).`);
+        const directConvs = await fetchInstagramConversations(igUserId, pageAccessToken, maxPages);
+        console.log(`[Instagram Sync] Using igUserId (${igUserId}) direct endpoint. Found ${directConvs.length} conversation(s).`);
+        if (directConvs.length > 0) {
+          conversations = directConvs;
+        }
       } catch (fallbackErr) {
         syncError = fallbackErr.response?.data?.error?.message || fallbackErr.message;
       }
     }
 
-    if (!fetchedFromPage && conversations.length === 0 && syncError) {
+    if (conversations.length === 0 && syncError && !fetchedFromPage) {
       console.warn(`[Instagram Sync] Meta API error during sync: ${syncError}`);
       return { success: false, error: syncError, count: 0, skipped: 0 };
     }
@@ -1224,7 +1256,17 @@ export async function syncInstagramChats(linkedPageId, pageAccessToken, igUserId
       if (!customer?.id) continue;
 
       const customerId = String(customer.id);
-      const customerName = customer.username || customer.name || `Instagram User ${customerId.slice(-4)}`;
+      let customerName = customer.username || customer.name || `Instagram User ${customerId.slice(-4)}`;
+      let profilePicUrl = null;
+
+      if (pageAccessToken) {
+        try {
+          const profile = await getInstagramUserProfile(customerId, pageAccessToken);
+          if (profile?.username) customerName = `@${profile.username}`;
+          else if (profile?.name) customerName = profile.name;
+          if (profile?.profilePic) profilePicUrl = profile.profilePic;
+        } catch (_) {}
+      }
 
       const contact = await upsertContact({
         phoneNumber: `ig_${customerId}`,
@@ -1236,6 +1278,7 @@ export async function syncInstagramChats(linkedPageId, pageAccessToken, igUserId
           igPageId: igUserId,
           igAccountName: `@${igUsername}`,
           senderType: 'instagram',
+          ...(profilePicUrl ? { profilePic: profilePicUrl } : {}),
         },
         updateTimestamp: false,
       });
@@ -1243,32 +1286,51 @@ export async function syncInstagramChats(linkedPageId, pageAccessToken, igUserId
       if (!contact) continue;
 
       const messages = (conv.messages?.data || []).slice().reverse();
+      const messageIds = messages.map((m) => m.id).filter(Boolean);
+
+      // Batch query existing messages to eliminate N+1 roundtrips
+      let existingIdsSet = new Set();
+      if (messageIds.length > 0) {
+        const { data: existingList } = await supabase
+          .from('messages')
+          .select('whatsapp_message_id')
+          .in('whatsapp_message_id', messageIds);
+        if (existingList) {
+          existingIdsSet = new Set(existingList.map((m) => m.whatsapp_message_id));
+        }
+      }
+
       let hasNewMessage = false;
 
       for (const msg of messages) {
         if (!msg.id) continue;
 
-        // Duplicate check via unique message ID
-        const { data: existing } = await supabase
-          .from('messages')
-          .select('id')
-          .eq('whatsapp_message_id', msg.id)
-          .maybeSingle();
-
-        if (existing) {
+        // Duplicate check via unique platform message ID
+        if (existingIdsSet.has(msg.id)) {
           skippedDuplicates++;
           continue;
         }
 
-        const isCustomer = String(msg.from?.id) === customerId;
+        const isCustomer = String(msg.from?.id) === customerId || msg.from?.username === customer.username;
+        let content = msg.message;
+        if (!content && msg.shares?.data?.[0]?.link) {
+          content = `[Instagram Shared Reel/Post: ${msg.shares.data[0].link}]`;
+        } else if (!content && msg.attachments?.data?.length) {
+          const attType = msg.attachments.data[0].type || 'media';
+          content = `[Instagram Attachment: ${attType}]`;
+        } else if (!content) {
+          content = '[Instagram Message]';
+        }
+
         await saveMessage({
           contactId: contact.id,
           phoneNumber: `ig_${customerId}`,
           direction: isCustomer ? 'inbound' : 'outbound',
           messageType: 'text',
-          content: msg.message || '[Instagram Message]',
+          content,
           whatsappMessageId: msg.id,
           status: 'delivered',
+          createdAt: msg.created_time || null,
         });
         totalMessages++;
         hasNewMessage = true;
@@ -1287,7 +1349,7 @@ export async function syncInstagramChats(linkedPageId, pageAccessToken, igUserId
   } catch (err) {
     const errDetail = err.response?.data?.error?.message || err.message;
     console.error(`[Instagram Sync Error]:`, errDetail);
-    return { success: false, error: errDetail, count: 0 };
+    return { success: false, error: errDetail, count: 0, skipped: 0 };
   }
 }
 
@@ -1335,18 +1397,27 @@ export async function syncSinglePageChats(pageId, pageAccessToken, pageName = 'F
       if (!contact) continue;
 
       const messages = (conv.messages?.data || []).slice().reverse();
+      const messageIds = messages.map((m) => m.id).filter(Boolean);
+
+      // Batch query existing messages to eliminate N+1 roundtrips
+      let existingIdsSet = new Set();
+      if (messageIds.length > 0) {
+        const { data: existingList } = await supabase
+          .from('messages')
+          .select('whatsapp_message_id')
+          .in('whatsapp_message_id', messageIds);
+        if (existingList) {
+          existingIdsSet = new Set(existingList.map((m) => m.whatsapp_message_id));
+        }
+      }
+
       let newMsgSaved = false;
 
       for (const msg of messages) {
         if (!msg.id) continue;
 
-        const { data: existingMsg } = await supabase
-          .from('messages')
-          .select('id')
-          .eq('whatsapp_message_id', msg.id)
-          .maybeSingle();
-
-        if (existingMsg) {
+        // Duplicate check via unique platform message ID
+        if (existingIdsSet.has(msg.id)) {
           skippedDuplicates++;
           continue;
         }
@@ -1360,6 +1431,7 @@ export async function syncSinglePageChats(pageId, pageAccessToken, pageName = 'F
           content: msg.message || '[Attachment]',
           whatsappMessageId: msg.id,
           status: 'delivered',
+          createdAt: msg.created_time || null,
         });
         syncedCount++;
         newMsgSaved = true;
@@ -1385,7 +1457,7 @@ export async function syncSinglePageChats(pageId, pageAccessToken, pageName = 'F
  * POST /api/integrations/facebook/sync
  * Manually trigger sync of existing chats from Meta Graph API
  */
-router.all('/sync', async (req, res) => {
+router.all('/sync', requireAuth, async (req, res) => {
   try {
     const { workspaceId = 'default_workspace', pageId } = { ...req.query, ...req.body };
     const connectedPages = await getConnectedPages(workspaceId, true);
@@ -1428,6 +1500,38 @@ router.all('/sync', async (req, res) => {
     });
   } catch (err) {
     console.error('[Facebook Sync Route Error]:', err.message);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+/**
+ * POST /api/integrations/facebook/instagram/sync-chats
+ * Direct sync for Instagram Direct messages
+ */
+router.post('/instagram/sync-chats', requireAuth, async (req, res) => {
+  try {
+    const pages = await getConnectedPages(null, true);
+    const igPage = pages.find((p) => p.pageId?.startsWith('ig_') || p.instagramBusinessAccountId);
+
+    if (!igPage || !igPage.accessToken) {
+      return res.json({
+        success: true,
+        message: 'No connected Instagram account found to sync.',
+        count: 0,
+        skipped: 0,
+      });
+    }
+
+    const igId = igPage.instagramBusinessAccountId || igPage.metadata?.igUserId || igPage.pageId.replace(/^ig_/, '');
+    const result = await syncInstagramChats(igPage.linkedPageId, igPage.accessToken, igId, igPage.name);
+
+    res.json({
+      success: true,
+      message: `Synced ${result.count || 0} Instagram message(s).`,
+      ...result,
+    });
+  } catch (err) {
+    console.error('[Instagram Sync Route Error]:', err.message);
     res.status(500).json({ success: false, error: err.message });
   }
 });

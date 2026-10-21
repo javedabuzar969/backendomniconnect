@@ -2,8 +2,12 @@
 import { Router } from 'express';
 import { supabase, getActiveWhatsAppConfig } from '../lib/supabase.js';
 import { getPhoneNumberDetails } from '../lib/whatsapp.js';
+import { requireAuth } from './auth.js';
 
 const router = Router();
+
+// Protect all integration settings routes with authentication
+router.use(requireAuth);
 
 /**
  * GET /api/integrations/whatsapp
@@ -11,20 +15,32 @@ const router = Router();
  */
 router.get('/whatsapp', async (req, res) => {
   try {
-    const config = await getActiveWhatsAppConfig();
-    let metaProfile = null;
+    const isPrimaryUser = req.user?.email === 'javedabuzar969@gmail.com';
+    const wsId = req.workspaceId;
 
-    try {
-      metaProfile = await getPhoneNumberDetails();
-    } catch {}
-
-    const { data: dbSettings } = await supabase
+    let query = supabase
       .from('whatsapp_settings')
       .select('*')
       .eq('is_active', true)
       .order('created_at', { ascending: false });
 
+    if (!isPrimaryUser && wsId) {
+      query = query.eq('workspace_id', wsId);
+    }
+
+    const { data: dbSettings } = await query;
     const activeRecord = dbSettings?.[0];
+
+    if (!activeRecord && !isPrimaryUser) {
+      return res.json({ success: true, data: [] });
+    }
+
+    const config = await getActiveWhatsAppConfig(wsId);
+    let metaProfile = null;
+
+    try {
+      metaProfile = await getPhoneNumberDetails();
+    } catch {}
 
     const connections = [
       {
@@ -91,7 +107,7 @@ router.delete('/whatsapp/:id', async (req, res) => {
   try {
     const { id } = req.params;
     if (id !== 'wa_conn_default') {
-      await supabase.from('whatsapp_settings').update({ is_active: false }).eq('id', id);
+      await supabase.from('whatsapp_settings').update({ is_active: false, access_token: 'REVOKED' }).eq('id', id);
     }
     res.json({ success: true, message: 'WhatsApp account disconnected' });
   } catch (err) {

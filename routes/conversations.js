@@ -4,8 +4,28 @@ import { supabase, saveMessage } from '../lib/supabase.js';
 import { sendWhatsAppText } from '../lib/whatsapp.js';
 import { sendMessengerText, sendInstagramDM } from '../lib/metaGraph.js';
 import { getConnectedPages, getPageByPageId } from '../lib/facebookDb.js';
+import { requireAuth } from './auth.js';
 
 const router = Router();
+
+// Protect all inbox conversation routes with authentication
+router.use(requireAuth);
+
+/**
+ * Sanitizes avatar URL: never renders null, undefined, or string literal "null"/"undefined".
+ * Falls back to deterministic Dicebear initials.
+ */
+export function getSanitizedAvatarUrl(contact) {
+  const raw = contact?.metadata?.profilePic;
+  if (typeof raw === 'string') {
+    const trimmed = raw.trim();
+    if (trimmed && trimmed !== 'null' && trimmed !== 'undefined' && trimmed.startsWith('http')) {
+      return trimmed;
+    }
+  }
+  const seed = encodeURIComponent((contact?.name || contact?.phone_number || 'User').trim());
+  return `https://api.dicebear.com/7.x/initials/svg?seed=${seed}&backgroundColor=0066ff&textColor=ffffff`;
+}
 
 /**
  * GET /api/conversations
@@ -25,6 +45,13 @@ router.get('/', async (req, res) => {
 
     if (channel && channel !== 'all') {
       query = query.eq('channel', channel);
+    }
+
+    // Strict multi-tenant isolation: new users only see their workspace contacts
+    const isPrimaryUser = req.user?.email === 'javedabuzar969@gmail.com';
+    const wsId = req.workspaceId;
+    if (!isPrimaryUser && wsId) {
+      query = query.or(`workspace_id.eq.${wsId},metadata->>workspaceId.eq.${wsId}`);
     }
 
     const { data: contacts, error: cErr } = await query;
@@ -126,9 +153,7 @@ router.get('/', async (req, res) => {
         unreadCount: messageList.filter((m) => m.sender === 'customer' && m.status !== 'read').length,
         status: 'open',
         isFavorite: false,
-        avatar:
-          contact.metadata?.profilePic ||
-          `https://api.dicebear.com/7.x/initials/svg?seed=${encodeURIComponent(contact.name || contact.phone_number)}`,
+        avatar: getSanitizedAvatarUrl(contact),
         messages: messageList,
       };
     });
@@ -147,8 +172,14 @@ router.get('/', async (req, res) => {
 router.get('/:id', async (req, res) => {
   try {
     const { id } = req.params;
-    const { data: contact } = await supabase.from('contacts').select('*').eq('id', id).single();
-    if (!contact) return res.status(404).json({ error: 'Conversation not found' });
+    const isPrimaryUser = req.user?.email === 'javedabuzar969@gmail.com';
+    const wsId = req.workspaceId;
+    let contactQuery = supabase.from('contacts').select('*').eq('id', id);
+    if (!isPrimaryUser && wsId) {
+      contactQuery = contactQuery.or(`workspace_id.eq.${wsId},metadata->>workspaceId.eq.${wsId}`);
+    }
+    const { data: contact } = await contactQuery.maybeSingle();
+    if (!contact) return res.status(404).json({ error: 'Conversation not found or access denied.' });
 
     const { data: msgs } = await supabase
       .from('messages')
@@ -175,6 +206,7 @@ router.get('/:id', async (req, res) => {
         channel: contact.channel || 'whatsapp',
         pageId: contact.metadata?.pageId || null,
         pageName: contact.metadata?.pageName || null,
+        avatar: getSanitizedAvatarUrl(contact),
         messages: messageList,
       },
     });
@@ -219,8 +251,14 @@ router.post('/:id/messages', async (req, res) => {
       return res.status(400).json({ error: 'Message content is required' });
     }
 
-    const { data: contact } = await supabase.from('contacts').select('*').eq('id', id).single();
-    if (!contact) return res.status(404).json({ error: 'Contact not found' });
+    const isPrimaryUser = req.user?.email === 'javedabuzar969@gmail.com';
+    const wsId = req.workspaceId;
+    let contactQuery = supabase.from('contacts').select('*').eq('id', id);
+    if (!isPrimaryUser && wsId) {
+      contactQuery = contactQuery.or(`workspace_id.eq.${wsId},metadata->>workspaceId.eq.${wsId}`);
+    }
+    const { data: contact } = await contactQuery.maybeSingle();
+    if (!contact) return res.status(404).json({ error: 'Contact not found or access denied.' });
 
     let sentExternalId = null;
     let sendStatus = 'pending';
@@ -315,6 +353,7 @@ router.post('/:id/messages', async (req, res) => {
       whatsappMessageId: sentExternalId || `msg_out_${Date.now()}`,
       status: sendStatus,
       errorMessage: sendError,
+      workspaceId: wsId,
     });
 
     if (sendStatus === 'failed') {

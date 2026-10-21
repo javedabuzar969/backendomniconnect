@@ -13,15 +13,16 @@ import {
   saveMessage,
   updateMessageStatusByWamid,
 } from '../lib/supabase.js';
+import { requireAuth } from './auth.js';
 
 const router = Router();
 
 // ============================================================================
 // 1. WhatsApp Connection Status & Settings
 // ============================================================================
-router.get('/status', async (req, res) => {
+router.get('/status', requireAuth, async (req, res) => {
   try {
-    const config = await getActiveWhatsAppConfig();
+    const config = await getActiveWhatsAppConfig(req.workspaceId);
     let metaInfo = null;
     let metaError = null;
 
@@ -58,9 +59,9 @@ router.get('/status', async (req, res) => {
   }
 });
 
-router.get('/config', async (req, res) => {
+router.get('/config', requireAuth, async (req, res) => {
   try {
-    const config = await getActiveWhatsAppConfig();
+    const config = await getActiveWhatsAppConfig(req.workspaceId);
     res.json({
       success: true,
       data: {
@@ -76,7 +77,7 @@ router.get('/config', async (req, res) => {
   }
 });
 
-router.post('/config', async (req, res) => {
+router.post('/config', requireAuth, async (req, res) => {
   try {
     const { phoneNumberId, wabaId, accessToken, displayPhoneNumber, apiVersion } = req.body;
 
@@ -96,6 +97,7 @@ router.post('/config', async (req, res) => {
         display_phone_number: displayPhoneNumber,
         api_version: apiVersion || 'v25.0',
         is_active: true,
+        workspace_id: req.workspaceId,
       })
       .select()
       .single();
@@ -116,7 +118,7 @@ router.post('/config', async (req, res) => {
  * POST /api/whatsapp/send-template
  * Send WhatsApp template message (e.g. jaspers_market_order_confirmation_v1)
  */
-router.post('/send-template', async (req, res) => {
+router.post('/send-template', requireAuth, async (req, res) => {
   try {
     const {
       to,
@@ -161,7 +163,7 @@ router.post('/send-template', async (req, res) => {
  * POST /api/whatsapp/send-text
  * Send standard WhatsApp text message
  */
-router.post('/send-text', async (req, res) => {
+router.post('/send-text', requireAuth, async (req, res) => {
   try {
     const { to, text, customerName, previewUrl = false } = req.body;
 
@@ -190,7 +192,7 @@ router.post('/send-text', async (req, res) => {
 // 3. Fetch Templates & Chat History from Supabase
 // ============================================================================
 
-router.get('/templates', async (req, res) => {
+router.get('/templates', requireAuth, async (req, res) => {
   try {
     const templates = await fetchMetaTemplates();
     res.json({ success: true, data: templates });
@@ -199,7 +201,7 @@ router.get('/templates', async (req, res) => {
   }
 });
 
-router.get('/messages', async (req, res) => {
+router.get('/messages', requireAuth, async (req, res) => {
   try {
     const { phoneNumber, limit = 50, offset = 0 } = req.query;
 
@@ -222,7 +224,7 @@ router.get('/messages', async (req, res) => {
   }
 });
 
-router.get('/contacts', async (req, res) => {
+router.get('/contacts', requireAuth, async (req, res) => {
   try {
     const { search, limit = 100 } = req.query;
     let query = supabase
@@ -230,6 +232,10 @@ router.get('/contacts', async (req, res) => {
       .select('*')
       .order('last_interaction_at', { ascending: false })
       .limit(Number(limit));
+
+    if (req.user?.email !== 'javedabuzar969@gmail.com' && req.workspaceId) {
+      query = query.eq('workspace_id', req.workspaceId);
+    }
 
     if (search) {
       query = query.or(`name.ilike.%${search}%,phone_number.ilike.%${search}%`);
@@ -244,7 +250,7 @@ router.get('/contacts', async (req, res) => {
   }
 });
 
-router.post('/contacts', async (req, res) => {
+router.post('/contacts', requireAuth, async (req, res) => {
   try {
     const { phoneNumber, name, tags, email } = req.body;
     if (!phoneNumber) {
@@ -270,7 +276,7 @@ router.post('/contacts', async (req, res) => {
 // ============================================================================
 // 4. WhatsApp Broadcast Campaign
 // ============================================================================
-router.post('/broadcast', async (req, res) => {
+router.post('/broadcast', requireAuth, async (req, res) => {
   try {
     const {
       name,
