@@ -1,4 +1,4 @@
-﻿// backend/routes/salesforce.js — Salesforce OAuth 2.0 Authorization Code Flow
+// backend/routes/salesforce.js — Salesforce OAuth 2.0 Authorization Code Flow
 // Enterprise Security Hardened: Exact Origins, Mutual Token Revocation, Concurrent Refresh Locks
 import { Router } from 'express';
 import crypto from 'node:crypto';
@@ -97,11 +97,16 @@ router.get('/connect', requireAuth, async (req, res) => {
     const state = crypto.randomBytes(24).toString('hex');
     const callbackUrl = process.env.SALESFORCE_CALLBACK_URL.trim();
 
+    // Generate PKCE code verifier & code challenge (RFC 7636) required by Salesforce
+    const codeVerifier = crypto.randomBytes(32).toString('base64url');
+    const codeChallenge = crypto.createHash('sha256').update(codeVerifier).digest('base64url');
+
     // Persist OAuth session in Supabase (survives Vercel cold starts)
     await saveOAuthSession(state, {
       workspaceId,
       userId,
       clientOrigin,
+      codeVerifier,
       type: 'salesforce',
       redirectUri: callbackUrl,
       createdAt: new Date().toISOString(),
@@ -115,6 +120,8 @@ router.get('/connect', requireAuth, async (req, res) => {
       redirect_uri: callbackUrl,
       state,
       scope: 'api refresh_token offline_access',
+      code_challenge: codeChallenge,
+      code_challenge_method: 'S256',
     });
 
     const oauthUrl = `${loginUrl}/services/oauth2/authorize?${params.toString()}`;
@@ -188,16 +195,22 @@ router.get('/oauth/callback', async (req, res) => {
     const loginUrl = getSalesforceLoginUrl();
     const callbackUrl = process.env.SALESFORCE_CALLBACK_URL.trim();
 
-    // ── Exchange authorization code for tokens (server-side only) ───────────
+    // ── Exchange authorization code for tokens (server-side only with PKCE) ─
+    const tokenParams = new URLSearchParams({
+      grant_type: 'authorization_code',
+      client_id: process.env.SALESFORCE_CLIENT_ID.trim(),
+      client_secret: process.env.SALESFORCE_CLIENT_SECRET.trim(),
+      redirect_uri: callbackUrl,
+      code,
+    });
+
+    if (session.codeVerifier) {
+      tokenParams.append('code_verifier', session.codeVerifier);
+    }
+
     const tokenResponse = await axios.post(
       `${loginUrl}/services/oauth2/token`,
-      new URLSearchParams({
-        grant_type: 'authorization_code',
-        client_id: process.env.SALESFORCE_CLIENT_ID.trim(),
-        client_secret: process.env.SALESFORCE_CLIENT_SECRET.trim(),
-        redirect_uri: callbackUrl,
-        code,
-      }).toString(),
+      tokenParams.toString(),
       {
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
         timeout: 15000,
