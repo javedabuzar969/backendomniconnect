@@ -45,10 +45,10 @@ app.get(['/', '/health', '/api/health'], (req, res) => {
 // ── Routes ───────────────────────────────────────────────
 app.use('/api/auth', authRouter);
 app.use('/api/whatsapp', whatsappRouter);
-app.use('/api/integrations', integrationsRouter);
-app.use('/api/integrations/facebook', facebookRouter);
-app.use('/api/conversations', conversationsRouter);
 app.use('/api/integrations/salesforce', salesforceRouter);
+app.use('/api/integrations/facebook', facebookRouter);
+app.use('/api/integrations', integrationsRouter);
+app.use('/api/conversations', conversationsRouter);
 
 // ── 404 Handler ──────────────────────────────────────────
 app.use((req, res) => {
