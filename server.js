@@ -7,6 +7,7 @@ import whatsappRouter from './routes/whatsapp.js';
 import integrationsRouter from './routes/integrations.js';
 import conversationsRouter from './routes/conversations.js';
 import facebookRouter from './routes/facebook.js';
+import salesforceRouter from './routes/salesforce.js';
 
 const app = express();
 const PORT = process.env.PORT || 4000;
@@ -47,6 +48,7 @@ app.use('/api/whatsapp', whatsappRouter);
 app.use('/api/integrations', integrationsRouter);
 app.use('/api/integrations/facebook', facebookRouter);
 app.use('/api/conversations', conversationsRouter);
+app.use('/api/integrations/salesforce', salesforceRouter);
 
 // ── 404 Handler ──────────────────────────────────────────
 app.use((req, res) => {
