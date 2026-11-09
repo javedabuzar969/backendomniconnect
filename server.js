@@ -8,6 +8,7 @@ import integrationsRouter from './routes/integrations.js';
 import conversationsRouter from './routes/conversations.js';
 import facebookRouter from './routes/facebook.js';
 import salesforceRouter from './routes/salesforce.js';
+import contactsRouter from './routes/contacts.js';
 
 const app = express();
 const PORT = process.env.PORT || 4000;
@@ -44,6 +45,7 @@ app.get(['/', '/health', '/api/health'], (req, res) => {
 
 // ── Routes ───────────────────────────────────────────────
 app.use('/api/auth', authRouter);
+app.use('/api/contacts', contactsRouter);
 app.use('/api/whatsapp', whatsappRouter);
 app.use('/api/integrations/salesforce', salesforceRouter);
 app.use('/api/integrations/facebook', facebookRouter);
