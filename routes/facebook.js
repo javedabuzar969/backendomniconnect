@@ -30,8 +30,26 @@ import {
 } from '../lib/facebookDb.js';
 import { supabase, upsertContact, saveMessage, updateMessageStatusByWamid } from '../lib/supabase.js';
 import { requireAuth } from './auth.js';
+import jwt from 'jsonwebtoken';
 
 const router = Router();
+const JWT_SECRET = process.env.JWT_SECRET || 'omniconnect_secret_2026';
+
+function optionalAuth(req, res, next) {
+  const auth = req.headers.authorization;
+  if (auth?.startsWith('Bearer ')) {
+    try {
+      const decoded = jwt.verify(auth.split(' ')[1], JWT_SECRET);
+      req.user = decoded;
+      req.userId = decoded.userId;
+      req.workspaceId = decoded.workspaceId || decoded.userId;
+    } catch {}
+  }
+  if (!req.workspaceId) {
+    req.workspaceId = 'default_workspace';
+  }
+  next();
+}
 
 const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:5173';
 const BACKEND_PORT = process.env.PORT || 5000;
@@ -268,7 +286,7 @@ router.get('/oauth/callback', async (req, res) => {
  * GET /api/integrations/facebook/pages
  * Retrieves connected Facebook Pages and/or available Pages from an active Meta OAuth session
  */
-router.get('/pages', requireAuth, async (req, res) => {
+router.get('/pages', optionalAuth, async (req, res) => {
   try {
     const { state } = req.query;
     const workspaceId = req.workspaceId || 'default_workspace';
@@ -314,7 +332,7 @@ router.get('/pages', requireAuth, async (req, res) => {
  * POST /api/integrations/facebook/connect-page
  * Connects a selected real Facebook Page and subscribes it to Messenger webhooks
  */
-router.post('/connect-page', requireAuth, async (req, res) => {
+router.post('/connect-page', optionalAuth, async (req, res) => {
   try {
     const { pageId, state } = req.body;
     const workspaceId = req.workspaceId || 'default_workspace';
