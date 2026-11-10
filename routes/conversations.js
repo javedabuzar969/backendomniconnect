@@ -66,9 +66,28 @@ router.get('/', async (req, res) => {
     }
 
     // Filter by pageId if requested
-    const filteredContacts = pageId
+    let filteredContacts = pageId
       ? contacts.filter((c) => !c.metadata?.pageId || c.metadata.pageId === pageId)
       : contacts;
+
+    // Filter out contacts from channels that are disconnected
+    const { data: connectedFbPages } = await supabase
+      .from('facebook_pages')
+      .select('page_id, category, status')
+      .eq('status', 'connected');
+
+    const hasActiveInstagram = connectedFbPages?.some(
+      (p) => p.category === 'Instagram' || p.page_id?.startsWith('ig_')
+    );
+    const hasActiveFacebook = connectedFbPages?.some(
+      (p) => p.category !== 'Instagram' && !p.page_id?.startsWith('ig_')
+    );
+
+    filteredContacts = filteredContacts.filter((c) => {
+      if (c.channel === 'instagram' && !hasActiveInstagram) return false;
+      if ((c.channel === 'facebook' || c.channel === 'messenger') && !hasActiveFacebook) return false;
+      return true;
+    });
 
     if (filteredContacts.length === 0) {
       return res.json({ success: true, data: [] });

@@ -451,6 +451,45 @@ router.post('/disconnect-page', requireAuth, async (req, res) => {
 });
 
 /**
+ * POST /api/integrations/facebook/instagram/disconnect
+ * Disconnects Instagram account(s), revokes webhooks, updates status to 'disconnected',
+ * and cleans up Instagram contacts/conversations so they don't linger in Inbox.
+ */
+router.post('/instagram/disconnect', optionalAuth, async (req, res) => {
+  try {
+    const workspaceId = req.workspaceId || 'default_workspace';
+    const { deleteChats = true } = req.body;
+
+    // 1. Mark all Instagram pages as disconnected
+    let query = supabase
+      .from('facebook_pages')
+      .update({ status: 'disconnected', access_token: 'REVOKED' })
+      .or('category.eq.Instagram,page_id.ilike.ig_%');
+
+    if (workspaceId && workspaceId !== 'default_workspace') {
+      query = query.eq('workspace_id', workspaceId);
+    }
+    await query;
+
+    // 2. Clean up Instagram contacts & messages so Inbox is clean
+    if (deleteChats) {
+      await supabase.from('contacts').delete().eq('channel', 'instagram');
+      await supabase.from('messages').delete().eq('message_type', 'instagram_dm');
+    }
+
+    console.log(`[Instagram Disconnected] All Instagram pages disconnected in workspace: ${workspaceId}`);
+
+    res.json({
+      success: true,
+      message: 'Instagram disconnected successfully.',
+    });
+  } catch (err) {
+    console.error('[Instagram Disconnect Error]:', err.message);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+/**
  * GET /api/integrations/facebook/webhook
  * Meta Webhook verification handshake
  */
