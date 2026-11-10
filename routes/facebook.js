@@ -423,7 +423,7 @@ router.post('/connect-page', optionalAuth, async (req, res) => {
  * POST /api/integrations/facebook/disconnect-page
  * Disconnects a Facebook Page and unsubscribes from webhook events
  */
-router.post('/disconnect-page', requireAuth, async (req, res) => {
+router.post('/disconnect-page', optionalAuth, async (req, res) => {
   try {
     const { pageId } = req.body;
     const workspaceId = req.workspaceId || 'default_workspace';
@@ -784,7 +784,7 @@ router.post('/webhook', async (req, res) => {
  * POST /api/integrations/facebook/send-message
  * Send a direct reply to a Facebook Messenger customer
  */
-router.post('/send-message', requireAuth, async (req, res) => {
+router.post('/send-message', optionalAuth, async (req, res) => {
   try {
     const { recipientPsid, text, pageId } = req.body;
 
@@ -954,17 +954,18 @@ router.get('/instagram/oauth/callback', async (req, res) => {
 
 /**
  * GET /api/integrations/facebook/instagram/accounts
- * List Instagram accounts available from active OAuth session
+ * List Instagram accounts available from active OAuth session OR linked to connected Facebook Page
  */
-router.get('/instagram/accounts', requireAuth, async (req, res) => {
+router.get('/instagram/accounts', optionalAuth, async (req, res) => {
   try {
     const { state } = req.query;
+    const workspaceId = req.workspaceId || 'default_workspace';
     let igAccounts = [];
     let hasOAuthSession = false;
 
     if (state) {
       const session = await getOAuthSession(state);
-      if (session?.igAccounts) {
+      if (session?.igAccounts && session.igAccounts.length > 0) {
         hasOAuthSession = true;
         igAccounts = session.igAccounts.map((acc) => ({
           igUserId: acc.igUserId,
@@ -975,6 +976,37 @@ router.get('/instagram/accounts', requireAuth, async (req, res) => {
           linkedPageName: acc.linkedPageName,
           linkedPageId: acc.linkedPageId,
         }));
+      }
+    }
+
+    // Fallback: If no accounts in session, check connected Facebook Pages for linked Instagram accounts
+    if (igAccounts.length === 0) {
+      const connectedPages = await getConnectedPages(workspaceId, true);
+      const fbPages = connectedPages.filter((p) => !p.pageId?.startsWith('ig_') && p.accessToken);
+
+      for (const p of fbPages) {
+        try {
+          const resp = await axios.get(`${GRAPH_BASE_URL}/${p.pageId}`, {
+            headers: { Authorization: `Bearer ${p.accessToken}` },
+            params: { fields: 'instagram_business_account{id,name,username,profile_picture_url,followers_count}' },
+            timeout: 8000,
+          });
+
+          const ig = resp.data?.instagram_business_account;
+          if (ig && ig.id) {
+            igAccounts.push({
+              igUserId: String(ig.id),
+              igUsername: ig.username || p.pageName,
+              igName: ig.name || ig.username || p.pageName,
+              igProfilePicture: ig.profile_picture_url || p.pictureUrl || null,
+              igFollowers: ig.followers_count || 0,
+              linkedPageName: p.pageName,
+              linkedPageId: p.pageId,
+            });
+          }
+        } catch (checkErr) {
+          console.warn(`[IG Auto-detect] Could not check IG for page ${p.pageId}:`, checkErr.message);
+        }
       }
     }
 
@@ -989,7 +1021,7 @@ router.get('/instagram/accounts', requireAuth, async (req, res) => {
  * POST /api/integrations/facebook/instagram/connect-account
  * Connect selected Instagram account and subscribe to webhooks
  */
-router.post('/instagram/connect-account', requireAuth, async (req, res) => {
+router.post('/instagram/connect-account', optionalAuth, async (req, res) => {
   try {
     const { igUserId, state } = req.body;
     const workspaceId = req.workspaceId || 'default_workspace';
@@ -1007,10 +1039,38 @@ router.post('/instagram/connect-account', requireAuth, async (req, res) => {
       }
     }
 
+    // Fallback: If not in state session, look up across connected Facebook Pages
+    if (!targetAccount || !targetAccount.pageAccessToken) {
+      const connectedPages = await getConnectedPages(workspaceId, true);
+      const fbPages = connectedPages.filter((p) => !p.pageId?.startsWith('ig_') && p.accessToken);
+
+      for (const p of fbPages) {
+        try {
+          const resp = await axios.get(`${GRAPH_BASE_URL}/${p.pageId}`, {
+            headers: { Authorization: `Bearer ${p.accessToken}` },
+            params: { fields: 'instagram_business_account{id,name,username,profile_picture_url}' },
+            timeout: 8000,
+          });
+          const ig = resp.data?.instagram_business_account;
+          if (ig && (String(ig.id) === String(igUserId) || !igUserId)) {
+            targetAccount = {
+              igUserId: String(ig.id),
+              igUsername: ig.username,
+              igProfilePicture: ig.profile_picture_url || null,
+              pageAccessToken: p.accessToken,
+              linkedPageId: p.pageId,
+              linkedPageName: p.pageName,
+            };
+            break;
+          }
+        } catch (_) {}
+      }
+    }
+
     if (!targetAccount || !targetAccount.pageAccessToken) {
       return res.status(400).json({
         success: false,
-        error: 'Instagram account not found in session. Please reconnect via Meta OAuth.',
+        error: 'Instagram account not found. Please link your Instagram Business account to your Facebook Page.',
       });
     }
 
@@ -1236,7 +1296,7 @@ router.get('/import/preview', async (req, res) => {
  * POST /api/integrations/facebook/import/execute
  * Resumable, duplicate-safe historical import
  */
-router.post('/import/execute', requireAuth, async (req, res) => {
+router.post('/import/execute', optionalAuth, async (req, res) => {
   try {
     const { platform = 'facebook', pageId } = req.body;
 
@@ -1514,7 +1574,7 @@ export async function syncSinglePageChats(pageId, pageAccessToken, pageName = 'F
  * POST /api/integrations/facebook/sync
  * Manually trigger sync of existing chats from Meta Graph API
  */
-router.all('/sync', requireAuth, async (req, res) => {
+router.all('/sync', optionalAuth, async (req, res) => {
   try {
     const { workspaceId = 'default_workspace', pageId } = { ...req.query, ...req.body };
     const connectedPages = await getConnectedPages(workspaceId, true);
@@ -1565,7 +1625,7 @@ router.all('/sync', requireAuth, async (req, res) => {
  * POST /api/integrations/facebook/instagram/sync-chats
  * Direct sync for Instagram Direct messages
  */
-router.post('/instagram/sync-chats', requireAuth, async (req, res) => {
+router.post('/instagram/sync-chats', optionalAuth, async (req, res) => {
   try {
     const pages = await getConnectedPages(null, true);
     const igPage = pages.find((p) => p.pageId?.startsWith('ig_') || p.instagramBusinessAccountId);

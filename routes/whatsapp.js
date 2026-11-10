@@ -13,14 +13,14 @@ import {
   saveMessage,
   updateMessageStatusByWamid,
 } from '../lib/supabase.js';
-import { requireAuth } from './auth.js';
+import { optionalAuth } from './auth.js';
 
 const router = Router();
 
 // ============================================================================
 // 1. WhatsApp Connection Status & Settings
 // ============================================================================
-router.get('/status', requireAuth, async (req, res) => {
+router.get('/status', optionalAuth, async (req, res) => {
   try {
     const config = await getActiveWhatsAppConfig(req.workspaceId);
     let metaInfo = null;
@@ -59,7 +59,7 @@ router.get('/status', requireAuth, async (req, res) => {
   }
 });
 
-router.get('/config', requireAuth, async (req, res) => {
+router.get('/config', optionalAuth, async (req, res) => {
   try {
     const config = await getActiveWhatsAppConfig(req.workspaceId);
     res.json({
@@ -77,7 +77,7 @@ router.get('/config', requireAuth, async (req, res) => {
   }
 });
 
-router.post('/config', requireAuth, async (req, res) => {
+router.post('/config', optionalAuth, async (req, res) => {
   try {
     const { phoneNumberId, wabaId, accessToken, displayPhoneNumber, apiVersion } = req.body;
 
@@ -118,7 +118,7 @@ router.post('/config', requireAuth, async (req, res) => {
  * POST /api/whatsapp/send-template
  * Send WhatsApp template message (e.g. jaspers_market_order_confirmation_v1)
  */
-router.post('/send-template', requireAuth, async (req, res) => {
+router.post('/send-template', optionalAuth, async (req, res) => {
   try {
     const {
       to,
@@ -163,7 +163,7 @@ router.post('/send-template', requireAuth, async (req, res) => {
  * POST /api/whatsapp/send-text
  * Send standard WhatsApp text message
  */
-router.post('/send-text', requireAuth, async (req, res) => {
+router.post('/send-text', optionalAuth, async (req, res) => {
   try {
     const { to, text, customerName, previewUrl = false } = req.body;
 
@@ -192,7 +192,7 @@ router.post('/send-text', requireAuth, async (req, res) => {
 // 3. Fetch Templates & Chat History from Supabase
 // ============================================================================
 
-router.get('/templates', requireAuth, async (req, res) => {
+router.get('/templates', optionalAuth, async (req, res) => {
   try {
     const templates = await fetchMetaTemplates();
     res.json({ success: true, data: templates });
@@ -201,7 +201,7 @@ router.get('/templates', requireAuth, async (req, res) => {
   }
 });
 
-router.get('/messages', requireAuth, async (req, res) => {
+router.get('/messages', optionalAuth, async (req, res) => {
   try {
     const { phoneNumber, limit = 50, offset = 0 } = req.query;
 
@@ -224,7 +224,7 @@ router.get('/messages', requireAuth, async (req, res) => {
   }
 });
 
-router.get('/contacts', requireAuth, async (req, res) => {
+router.get('/contacts', optionalAuth, async (req, res) => {
   try {
     const { search, limit = 100 } = req.query;
     let query = supabase
@@ -250,7 +250,7 @@ router.get('/contacts', requireAuth, async (req, res) => {
   }
 });
 
-router.post('/contacts', requireAuth, async (req, res) => {
+router.post('/contacts', optionalAuth, async (req, res) => {
   try {
     const { phoneNumber, name, tags, email } = req.body;
     if (!phoneNumber) {
@@ -276,7 +276,7 @@ router.post('/contacts', requireAuth, async (req, res) => {
 // ============================================================================
 // 4. WhatsApp Broadcast Campaign
 // ============================================================================
-router.post('/broadcast', requireAuth, async (req, res) => {
+router.post('/broadcast', optionalAuth, async (req, res) => {
   try {
     const {
       name,

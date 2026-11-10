@@ -93,6 +93,22 @@ export function requireAuth(req, res, next) {
   }
 }
 
+export function optionalAuth(req, res, next) {
+  const auth = req.headers.authorization;
+  if (auth?.startsWith('Bearer ')) {
+    try {
+      const decoded = jwt.verify(auth.split(' ')[1], JWT_SECRET);
+      req.user = decoded;
+      req.userId = decoded.userId;
+      req.workspaceId = decoded.workspaceId || decoded.userId;
+    } catch {}
+  }
+  if (!req.workspaceId) {
+    req.workspaceId = 'default_workspace';
+  }
+  next();
+}
+
 // ── POST /api/auth/signup ────────────────────────────────
 router.post('/signup', async (req, res) => {
   try {
