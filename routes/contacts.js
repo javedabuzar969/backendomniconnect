@@ -1,8 +1,15 @@
 // backend/routes/contacts.js — Contacts CRUD API with Supabase
 import { Router } from 'express';
 import { supabase } from '../lib/supabase.js';
+import { optionalAuth } from './auth.js';
+
+const OWNER_EMAIL = 'javedabuzar969@gmail.com';
+const OWNER_WORKSPACE = '32e99783-06da-4c9e-b595-102f7ff20132';
 
 const router = Router();
+
+// Apply auth to all routes
+router.use(optionalAuth);
 
 // ─── Helper: Normalize contact row from DB → frontend shape ───────────────────
 function normalizeContact(row) {
@@ -34,7 +41,11 @@ function normalizeContact(row) {
 // ─── GET /api/contacts — List all contacts ────────────────────────────────────
 router.get('/', async (req, res) => {
   try {
-    const { q, channel, limit = 200, offset = 0, workspace_id } = req.query;
+    const { q, channel, limit = 200, offset = 0 } = req.query;
+
+    // ── Strict workspace isolation ──────────────────────────────────────────
+    const isPrimaryUser = req.user?.email === OWNER_EMAIL;
+    const wsId = req.workspaceId;
 
     let query = supabase
       .from('contacts')
@@ -42,8 +53,15 @@ router.get('/', async (req, res) => {
       .order('created_at', { ascending: false })
       .range(Number(offset), Number(offset) + Number(limit) - 1);
 
-    if (workspace_id) {
-      query = query.eq('workspace_id', workspace_id);
+    if (isPrimaryUser) {
+      // Owner sees all their contacts (workspace = owner workspace OR null legacy)
+      query = query.or(`workspace_id.eq.${OWNER_WORKSPACE},workspace_id.is.null`);
+    } else if (wsId && wsId !== 'default_workspace' && wsId !== OWNER_WORKSPACE) {
+      // Other users: ONLY their own workspace — never see owner's data
+      query = query.eq('workspace_id', wsId);
+    } else {
+      // No auth / default workspace → return empty
+      return res.json({ contacts: [], total: 0 });
     }
 
     if (channel && channel !== 'all') {
@@ -67,12 +85,20 @@ router.get('/', async (req, res) => {
 // ─── GET /api/contacts/:id — Get single contact ───────────────────────────────
 router.get('/:id', async (req, res) => {
   try {
-    const { data, error } = await supabase
-      .from('contacts')
-      .select('*')
-      .eq('id', req.params.id)
-      .maybeSingle();
+    const isPrimaryUser = req.user?.email === OWNER_EMAIL;
+    const wsId = req.workspaceId;
 
+    let query = supabase.from('contacts').select('*').eq('id', req.params.id);
+
+    if (isPrimaryUser) {
+      // owner can access any contact
+    } else if (wsId && wsId !== 'default_workspace' && wsId !== OWNER_WORKSPACE) {
+      query = query.eq('workspace_id', wsId);
+    } else {
+      return res.status(403).json({ error: 'Access denied' });
+    }
+
+    const { data, error } = await query.maybeSingle();
     if (error) throw error;
     if (!data) return res.status(404).json({ error: 'Contact not found' });
 
@@ -95,8 +121,14 @@ router.post('/', async (req, res) => {
       channel = 'whatsapp',
       tags = ['New Lead'],
       optedInThrough = 'Manually',
-      workspace_id = null,
     } = req.body;
+
+    // Assign workspace from auth token
+    const isPrimaryUser = req.user?.email === OWNER_EMAIL;
+    const wsId = req.workspaceId;
+    const assignedWorkspace = isPrimaryUser
+      ? OWNER_WORKSPACE
+      : (wsId && wsId !== 'default_workspace' ? wsId : null);
 
     const name = `${firstName.trim()} ${lastName.trim()}`.trim() || 'New Contact';
 
@@ -115,7 +147,6 @@ router.post('/', async (req, res) => {
       automationsPaused: false,
       optedInThrough,
       contactTime: 'Unknown',
-      ...(workspace_id ? { workspaceId: workspace_id } : {}),
     };
 
     const insertPayload = {
@@ -126,8 +157,8 @@ router.post('/', async (req, res) => {
       status: 'Subscribed',
       tags,
       metadata,
+      workspace_id: assignedWorkspace,
       last_interaction_at: new Date().toISOString(),
-      ...(workspace_id ? { workspace_id } : {}),
     };
 
     let { data, error } = await supabase
