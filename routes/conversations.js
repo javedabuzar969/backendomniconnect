@@ -320,7 +320,11 @@ router.post('/:id/messages', async (req, res) => {
     // ── 2. Facebook Messenger Reply ───────────────────────────────────
     else if (contact.channel === 'facebook') {
       try {
-        const psid = contact.phone_number.replace(/^fb_/, '');
+        const psid = contact.phone_number.replace(/^fb_/, '').trim();
+        if (!/^\d+$/.test(psid)) {
+          throw new Error('This contact does not have a valid Meta Page-Scoped ID (PSID). On Facebook, you can only send messages to users who have first sent a message to your Facebook Page.');
+        }
+
         const targetPageId = contact.metadata?.pageId;
 
         let page = null;
@@ -329,7 +333,7 @@ router.post('/:id/messages', async (req, res) => {
         }
 
         if (!page || !page.accessToken) {
-          const connectedPages = await getConnectedPages(null, true);
+          const connectedPages = await getConnectedPages(wsId, true);
           page = connectedPages.find((p) => p.accessToken && !p.pageId?.startsWith('ig_'));
         }
 
@@ -351,7 +355,11 @@ router.post('/:id/messages', async (req, res) => {
     // ── 3. Instagram Direct Reply ─────────────────────────────────────
     else if (contact.channel === 'instagram') {
       try {
-        const recipientIgUserId = contact.metadata?.igUserId || contact.phone_number.replace(/^ig_/, '');
+        const recipientIgUserId = (contact.metadata?.igUserId || contact.phone_number.replace(/^ig_/, '')).trim();
+        if (!/^\d+$/.test(recipientIgUserId)) {
+          throw new Error('This contact does not have a valid Meta Instagram-Scoped ID (IGSID). On Instagram, you can only reply to users who have messaged your Instagram account first.');
+        }
+
         const targetPageId = contact.metadata?.igPageId || contact.metadata?.pageId;
 
         let page = null;
@@ -360,7 +368,7 @@ router.post('/:id/messages', async (req, res) => {
         }
 
         if (!page || !page.accessToken) {
-          const connectedPages = await getConnectedPages(null, true);
+          const connectedPages = await getConnectedPages(wsId, true);
           page = connectedPages.find((p) => p.pageId?.startsWith('ig_') && p.accessToken);
         }
 

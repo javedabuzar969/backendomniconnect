@@ -471,12 +471,7 @@ router.post('/instagram/disconnect', optionalAuth, async (req, res) => {
     }
     await query;
 
-    // 2. Clean up Instagram contacts & messages so Inbox is clean
-    if (deleteChats) {
-      await supabase.from('contacts').delete().eq('channel', 'instagram');
-      await supabase.from('messages').delete().eq('message_type', 'instagram_dm');
-    }
-
+    // 2. Do not delete contacts or messages from DB; status 'disconnected' automatically hides them from Inbox
     console.log(`[Instagram Disconnected] All Instagram pages disconnected in workspace: ${workspaceId}`);
 
     res.json({
@@ -1325,7 +1320,7 @@ router.post('/import/execute', optionalAuth, async (req, res) => {
 /**
  * Sync historical Instagram Direct chats for a connected account
  */
-export async function syncInstagramChats(linkedPageId, pageAccessToken, igUserId, igUsername, { maxPages = 1 } = {}) {
+export async function syncInstagramChats(linkedPageId, pageAccessToken, igUserId, igUsername, { maxPages = 1, workspaceId = null } = {}) {
   try {
     console.log(`[Instagram Sync] Starting sync for @${igUsername} | igUserId=${igUserId} | linkedPageId=${linkedPageId}`);
 
@@ -1398,6 +1393,7 @@ export async function syncInstagramChats(linkedPageId, pageAccessToken, igUserId
           ...(profilePicUrl ? { profilePic: profilePicUrl } : {}),
         },
         updateTimestamp: false,
+        workspaceId,
       });
 
       if (!contact) continue;
@@ -1448,6 +1444,7 @@ export async function syncInstagramChats(linkedPageId, pageAccessToken, igUserId
           whatsappMessageId: msg.id,
           status: 'delivered',
           createdAt: msg.created_time || null,
+          workspaceId,
         });
         totalMessages++;
         hasNewMessage = true;
@@ -1473,13 +1470,13 @@ export async function syncInstagramChats(linkedPageId, pageAccessToken, igUserId
 /**
  * Helper to sync conversations and messages from Meta Graph API for a Facebook Page
  */
-export async function syncSinglePageChats(pageId, pageAccessToken, pageName = 'Facebook Page') {
+export async function syncSinglePageChats(pageId, pageAccessToken, pageName = 'Facebook Page', workspaceId = null) {
   try {
     const resolvedPageName = (!pageName || pageName === 'undefined' || pageName === 'Facebook Page')
       ? 'Omniconnect'
       : pageName;
 
-    const conversations = await fetchPageConversations(pageId, pageAccessToken, null, 3);
+    const conversations = await fetchPageConversations(pageId, pageAccessToken, null, 1);
     let syncedCount = 0;
     let skippedDuplicates = 0;
 
@@ -1509,6 +1506,7 @@ export async function syncSinglePageChats(pageId, pageAccessToken, pageName = 'F
           ...(profilePicUrl ? { profilePic: profilePicUrl } : {}),
         },
         updateTimestamp: false,
+        workspaceId,
       });
 
       if (!contact) continue;
@@ -1549,6 +1547,7 @@ export async function syncSinglePageChats(pageId, pageAccessToken, pageName = 'F
           whatsappMessageId: msg.id,
           status: 'delivered',
           createdAt: msg.created_time || null,
+          workspaceId,
         });
         syncedCount++;
         newMsgSaved = true;
@@ -1576,8 +1575,9 @@ export async function syncSinglePageChats(pageId, pageAccessToken, pageName = 'F
  */
 router.all('/sync', optionalAuth, async (req, res) => {
   try {
-    const { workspaceId = 'default_workspace', pageId } = { ...req.query, ...req.body };
-    const connectedPages = await getConnectedPages(workspaceId, true);
+    const wsId = req.user?.workspace_id || req.query.workspaceId || req.body.workspaceId || 'default_workspace';
+    const { pageId } = { ...req.query, ...req.body };
+    const connectedPages = await getConnectedPages(wsId, true);
 
     const pagesToSync = pageId
       ? connectedPages.filter((p) => String(p.pageId || p.id) === String(pageId))
@@ -1596,16 +1596,19 @@ router.all('/sync', optionalAuth, async (req, res) => {
 
     for (const page of pagesToSync) {
       if (!page.accessToken) continue;
-      // Handle Instagram account sync vs Facebook Page sync
-      if (page.pageId?.startsWith('ig_')) {
-        const igId = page.instagramBusinessAccountId || page.metadata?.igUserId || page.pageId.replace(/^ig_/, '');
-        const r = await syncInstagramChats(page.linkedPageId, page.accessToken, igId, page.name);
-        if (r.success) totalSynced += (r.count || 0);
-        results.push({ pageId: page.pageId, pageName: page.name, ...r });
-      } else {
-        const r = await syncSinglePageChats(page.pageId || page.id, page.accessToken, page.name || page.pageName);
-        if (r.success) totalSynced += (r.syncedCount || 0);
-        results.push({ pageId: page.pageId || page.id, pageName: page.name, ...r });
+      try {
+        if (page.pageId?.startsWith('ig_')) {
+          const igId = page.instagramBusinessAccountId || page.metadata?.igUserId || page.pageId.replace(/^ig_/, '');
+          const r = await syncInstagramChats(page.linkedPageId, page.accessToken, igId, page.name, { maxPages: 1, workspaceId: wsId });
+          if (r.success) totalSynced += (r.count || 0);
+          results.push({ pageId: page.pageId, pageName: page.name, ...r });
+        } else {
+          const r = await syncSinglePageChats(page.pageId || page.id, page.accessToken, page.name || page.pageName, wsId);
+          if (r.success) totalSynced += (r.syncedCount || 0);
+          results.push({ pageId: page.pageId || page.id, pageName: page.name, ...r });
+        }
+      } catch (pageSyncErr) {
+        console.warn(`[Sync Page Warn] ${page.name}:`, pageSyncErr.message);
       }
     }
 
@@ -1627,7 +1630,8 @@ router.all('/sync', optionalAuth, async (req, res) => {
  */
 router.post('/instagram/sync-chats', optionalAuth, async (req, res) => {
   try {
-    const pages = await getConnectedPages(null, true);
+    const wsId = req.user?.workspace_id || req.query.workspaceId || req.body.workspaceId || 'default_workspace';
+    const pages = await getConnectedPages(wsId, true);
     const igPage = pages.find((p) => p.pageId?.startsWith('ig_') || p.instagramBusinessAccountId);
 
     if (!igPage || !igPage.accessToken) {
@@ -1640,7 +1644,7 @@ router.post('/instagram/sync-chats', optionalAuth, async (req, res) => {
     }
 
     const igId = igPage.instagramBusinessAccountId || igPage.metadata?.igUserId || igPage.pageId.replace(/^ig_/, '');
-    const result = await syncInstagramChats(igPage.linkedPageId, igPage.accessToken, igId, igPage.name);
+    const result = await syncInstagramChats(igPage.linkedPageId, igPage.accessToken, igId, igPage.name, { maxPages: 1, workspaceId: wsId });
 
     res.json({
       success: true,
