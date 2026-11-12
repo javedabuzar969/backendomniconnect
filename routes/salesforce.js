@@ -14,6 +14,7 @@ import {
   disconnectSalesforce,
 } from '../lib/salesforceDb.js';
 import { validateEncryptionKey } from '../lib/cryptoUtils.js';
+import { supabaseAdmin, supabase } from '../lib/supabase.js';
 
 const router = Router();
 
@@ -388,6 +389,192 @@ router.post('/disconnect', requireAuth, async (req, res) => {
   } catch (err) {
     console.error('[Salesforce Disconnect]', err.message);
     res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// ── POST /api/integrations/salesforce/sync-contacts ────────────────────────
+// Pushes all workspace contacts (Instagram, Facebook, WhatsApp) into Salesforce CRM standard Contact object.
+router.post('/sync-contacts', requireAuth, async (req, res) => {
+  try {
+    const workspaceId = req.workspaceId;
+    if (!workspaceId) {
+      return res.status(400).json({ success: false, error: 'Workspace context missing' });
+    }
+
+    // 1. Verify connection
+    const connection = await getSalesforceConnection(workspaceId);
+    if (!connection) {
+      return res.status(400).json({
+        success: false,
+        error: 'Salesforce is not connected for this workspace. Please connect Salesforce first.',
+      });
+    }
+
+    // 2. Retrieve valid access token & instance URL (auto-refresh if expired)
+    let tokens = await getSalesforceTokens(workspaceId);
+    if (!tokens?.accessToken) {
+      return res.status(400).json({ success: false, error: 'No active Salesforce tokens found. Please reconnect.' });
+    }
+
+    let accessToken = tokens.accessToken;
+    const instanceUrl = tokens.instanceUrl || connection.instance_url;
+
+    // 3. Fetch contacts from Supabase
+    let query = supabase.from('contacts').select('*');
+    if (workspaceId === '32e99783-06da-4c9e-b595-102f7ff20132') {
+      query = query.or('workspace_id.eq.32e99783-06da-4c9e-b595-102f7ff20132,workspace_id.is.null');
+    } else {
+      query = query.eq('workspace_id', workspaceId);
+    }
+
+    const { data: contacts, error: contactsErr } = await query;
+    if (contactsErr) {
+      throw new Error(`Failed to load contacts: ${contactsErr.message}`);
+    }
+
+    if (!contacts || contacts.length === 0) {
+      return res.json({ success: true, message: 'No contacts found to sync.', syncedCount: 0, total: 0 });
+    }
+
+    console.log(`[Salesforce Sync] Starting sync of ${contacts.length} contacts for workspace ${workspaceId}`);
+
+    // Helper to call Salesforce REST API with automatic 401 retry via refresh
+    const callSalesforce = async (method, path, body = null) => {
+      const url = `${instanceUrl}${path}`;
+      try {
+        return await axios({
+          method,
+          url,
+          data: body,
+          headers: {
+            Authorization: `Bearer ${accessToken}`,
+            'Content-Type': 'application/json',
+          },
+          timeout: 15000,
+        });
+      } catch (err) {
+        if (err.response?.status === 401) {
+          console.log('[Salesforce Sync] Access token expired, attempting refresh...');
+          accessToken = await refreshSalesforceToken(workspaceId);
+          return await axios({
+            method,
+            url,
+            data: body,
+            headers: {
+              Authorization: `Bearer ${accessToken}`,
+              'Content-Type': 'application/json',
+            },
+            timeout: 15000,
+          });
+        }
+        throw err;
+      }
+    };
+
+    const results = {
+      total: contacts.length,
+      created: 0,
+      updated: 0,
+      failed: 0,
+      errors: [],
+    };
+
+    // 4. Push each contact into Salesforce standard Contact object
+    for (const contact of contacts) {
+      try {
+        const rawName = (contact.name || 'OmniContact').trim();
+        const parts = rawName.split(/\s+/);
+        let firstName = '';
+        let lastName = rawName;
+
+        if (parts.length > 1) {
+          firstName = parts.slice(0, -1).join(' ');
+          lastName = parts[parts.length - 1];
+        }
+
+        // Clean phone number (strip fb_/ig_ prefixes for clean CRM display)
+        const phone = contact.phone_number
+          ? contact.phone_number.replace(/^(fb_|ig_)/, '')
+          : null;
+
+        // Map LeadSource: WhatsApp / Facebook / Instagram
+        let leadSource = 'Other';
+        if (contact.channel === 'whatsapp') leadSource = 'WhatsApp';
+        else if (contact.channel === 'facebook') leadSource = 'Facebook';
+        else if (contact.channel === 'instagram') leadSource = 'Instagram';
+
+        const description = [
+          `Channel: ${contact.channel || 'N/A'}`,
+          `OmniConnect ID: ${contact.id}`,
+          contact.status ? `Status: ${contact.status}` : '',
+          Array.isArray(contact.tags) && contact.tags.length ? `Tags: ${contact.tags.join(', ')}` : '',
+        ].filter(Boolean).join(' | ');
+
+        // Query Salesforce to check if Contact already exists by Phone or Email or Description
+        let existingSfContactId = null;
+        try {
+          let soql = '';
+          if (contact.email) {
+            soql = `SELECT Id FROM Contact WHERE Email = '${contact.email.replace(/'/g, "\\'")}' LIMIT 1`;
+          } else if (phone && /^\+?[0-9]{8,15}$/.test(phone)) {
+            soql = `SELECT Id FROM Contact WHERE Phone = '${phone}' LIMIT 1`;
+          }
+
+          if (soql) {
+            const searchRes = await callSalesforce('GET', `/services/data/v59.0/query/?q=${encodeURIComponent(soql)}`);
+            if (searchRes.data?.records?.length > 0) {
+              existingSfContactId = searchRes.data.records[0].Id;
+            }
+          }
+        } catch (searchErr) {
+          // If query fails, proceed to insert
+          console.warn('[Salesforce Sync] Duplicate check warning:', searchErr.message);
+        }
+
+        const payload = {
+          LastName: lastName || 'Lead',
+          ...(firstName ? { FirstName: firstName } : {}),
+          ...(contact.email ? { Email: contact.email } : {}),
+          ...(phone && /^\+?[0-9]{8,15}$/.test(phone) ? { Phone: phone } : {}),
+          LeadSource: leadSource,
+          Description: description,
+        };
+
+        if (existingSfContactId) {
+          // Update existing Contact
+          await callSalesforce('PATCH', `/services/data/v59.0/sobjects/Contact/${existingSfContactId}`, payload);
+          results.updated++;
+        } else {
+          // Create new Contact
+          const createRes = await callSalesforce('POST', '/services/data/v59.0/sobjects/Contact', payload);
+          if (createRes.data?.success) {
+            results.created++;
+          } else {
+            results.failed++;
+          }
+        }
+      } catch (itemErr) {
+        results.failed++;
+        const sfMsg = itemErr.response?.data?.[0]?.message || itemErr.message;
+        results.errors.push({
+          contactId: contact.id,
+          name: contact.name,
+          error: sfMsg,
+        });
+        console.error(`[Salesforce Sync] Failed for ${contact.name}:`, sfMsg);
+      }
+    }
+
+    console.log(`[Salesforce Sync Complete] Created: ${results.created}, Updated: ${results.updated}, Failed: ${results.failed}`);
+
+    return res.json({
+      success: true,
+      message: `Sync completed: ${results.created} created, ${results.updated} updated, ${results.failed} failed.`,
+      results,
+    });
+  } catch (err) {
+    console.error('[Salesforce Sync Error]', err.message);
+    return res.status(500).json({ success: false, error: err.message });
   }
 });
 
