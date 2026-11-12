@@ -68,10 +68,12 @@ router.get('/whatsapp', async (req, res) => {
 router.post('/whatsapp/connect', async (req, res) => {
   try {
     const { phoneNumberId, wabaId, accessToken, displayPhoneNumber } = req.body;
+    const wsId = req.workspaceId;
 
     const { data, error } = await supabase
       .from('whatsapp_settings')
       .insert({
+        workspace_id: wsId,
         phone_number_id: phoneNumberId || process.env.WHATSAPP_PHONE_NUMBER_ID,
         waba_id: wabaId || process.env.WHATSAPP_BUSINESS_ACCOUNT_ID,
         access_token: accessToken || process.env.WHATSAPP_ACCESS_TOKEN,

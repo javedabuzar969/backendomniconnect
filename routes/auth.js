@@ -15,7 +15,7 @@ export async function resolveUserWorkspace(user) {
 
   // Primary user gets their dedicated legacy/primary workspace
   if (user.email === 'javedabuzar969@gmail.com') {
-    return '0fc2e913-0fb8-4525-880c-a51993317970';
+    return '32e99783-06da-4c9e-b595-102f7ff20132';
   }
 
   try {
