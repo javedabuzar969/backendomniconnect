@@ -47,11 +47,18 @@ router.get('/', async (req, res) => {
       query = query.eq('channel', channel);
     }
 
-    // Multi-tenant workspace handling: allow primary workspace & shared channel contacts
+    // Multi-tenant workspace handling — STRICT isolation, never expose null-workspace data to other users
     const isPrimaryUser = req.user?.email === 'javedabuzar969@gmail.com';
     const wsId = req.workspaceId;
-    if (!isPrimaryUser && wsId && wsId !== 'default_workspace' && wsId !== '32e99783-06da-4c9e-b595-102f7ff20132') {
-      query = query.or(`workspace_id.eq.${wsId},workspace_id.is.null,metadata->>workspaceId.eq.${wsId}`);
+
+    if (isPrimaryUser) {
+      // Primary user (owner) sees everything — no extra filter needed
+    } else if (wsId && wsId !== 'default_workspace' && wsId !== '32e99783-06da-4c9e-b595-102f7ff20132') {
+      // Other logged-in users: ONLY their own workspace — NEVER null/owner workspace
+      query = query.eq('workspace_id', wsId);
+    } else {
+      // Not authenticated or default_workspace — return nothing
+      return res.json({ success: true, data: [] });
     }
 
     const { data: contacts, error: cErr } = await query;
@@ -194,8 +201,13 @@ router.get('/:id', async (req, res) => {
     const isPrimaryUser = req.user?.email === 'javedabuzar969@gmail.com';
     const wsId = req.workspaceId;
     let contactQuery = supabase.from('contacts').select('*').eq('id', id);
-    if (!isPrimaryUser && wsId && wsId !== 'default_workspace' && wsId !== '32e99783-06da-4c9e-b595-102f7ff20132') {
-      contactQuery = contactQuery.or(`workspace_id.eq.${wsId},workspace_id.is.null,metadata->>workspaceId.eq.${wsId}`);
+    if (isPrimaryUser) {
+      // Owner sees all contacts — no extra filter
+    } else if (wsId && wsId !== 'default_workspace' && wsId !== '32e99783-06da-4c9e-b595-102f7ff20132') {
+      // Other users: strictly their workspace only
+      contactQuery = contactQuery.eq('workspace_id', wsId);
+    } else {
+      return res.status(403).json({ error: 'Access denied.' });
     }
     const { data: contact } = await contactQuery.maybeSingle();
     if (!contact) return res.status(404).json({ error: 'Conversation not found or access denied.' });
@@ -273,8 +285,13 @@ router.post('/:id/messages', async (req, res) => {
     const isPrimaryUser = req.user?.email === 'javedabuzar969@gmail.com';
     const wsId = req.workspaceId;
     let contactQuery = supabase.from('contacts').select('*').eq('id', id);
-    if (!isPrimaryUser && wsId && wsId !== 'default_workspace' && wsId !== '32e99783-06da-4c9e-b595-102f7ff20132') {
-      contactQuery = contactQuery.or(`workspace_id.eq.${wsId},workspace_id.is.null,metadata->>workspaceId.eq.${wsId}`);
+    if (isPrimaryUser) {
+      // Owner sees all contacts — no extra filter
+    } else if (wsId && wsId !== 'default_workspace' && wsId !== '32e99783-06da-4c9e-b595-102f7ff20132') {
+      // Other users: strictly their workspace only
+      contactQuery = contactQuery.eq('workspace_id', wsId);
+    } else {
+      return res.status(403).json({ error: 'Access denied.' });
     }
     const { data: contact } = await contactQuery.maybeSingle();
     if (!contact) return res.status(404).json({ error: 'Contact not found or access denied.' });
