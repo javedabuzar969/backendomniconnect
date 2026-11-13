@@ -121,6 +121,7 @@ router.get('/connect', requireAuth, async (req, res) => {
       redirect_uri: callbackUrl,
       state,
       scope: 'api refresh_token offline_access',
+      prompt: 'login consent',
       code_challenge: codeChallenge,
       code_challenge_method: 'S256',
     });
