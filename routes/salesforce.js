@@ -102,19 +102,31 @@ router.get('/connect', requireAuth, async (req, res) => {
     const codeVerifier = crypto.randomBytes(32).toString('base64url');
     const codeChallenge = crypto.createHash('sha256').update(codeVerifier).digest('base64url');
 
+    // Determine loginUrl (support client's custom My Domain or default)
+    let loginUrl = getSalesforceLoginUrl();
+    const customDomain = req.query.customDomain ? req.query.customDomain.trim() : null;
+    if (customDomain) {
+      // Clean customDomain: strip http://, https://, and trailing slashes
+      let cleanDomain = customDomain.replace(/^https?:\/\//i, '').replace(/\/+$/, '');
+      if (!cleanDomain.includes('.')) {
+        cleanDomain = `${cleanDomain}.my.salesforce.com`;
+      }
+      loginUrl = `https://${cleanDomain}`;
+    }
+
     // Persist OAuth session in Supabase (survives Vercel cold starts)
     await saveOAuthSession(state, {
       workspaceId,
       userId,
       clientOrigin,
       codeVerifier,
+      loginUrl,
       type: 'salesforce',
       redirectUri: callbackUrl,
       createdAt: new Date().toISOString(),
       expiresAt: Date.now() + 15 * 60 * 1000, // 15 minutes
     });
 
-    const loginUrl = getSalesforceLoginUrl();
     const params = new URLSearchParams({
       response_type: 'code',
       client_id: process.env.SALESFORCE_CLIENT_ID.trim(),
@@ -194,7 +206,7 @@ router.get('/oauth/callback', async (req, res) => {
   try {
     validateEnv();
 
-    const loginUrl = getSalesforceLoginUrl();
+    const loginUrl = session.loginUrl || getSalesforceLoginUrl();
     const callbackUrl = process.env.SALESFORCE_CALLBACK_URL.trim();
 
     // ── Exchange authorization code for tokens (server-side only with PKCE) ─
