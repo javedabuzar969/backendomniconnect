@@ -410,7 +410,7 @@ router.post('/connect-direct', requireAuth, async (req, res) => {
       if (errorData?.error === 'invalid_grant') {
         friendlyMsg = 'Invalid username, password, or security token. If your IP is not trusted in Salesforce, a Security Token is required appended to your password.';
       }
-      return res.status(401).json({
+      return res.status(400).json({
         success: false,
         error: friendlyMsg,
         code: errorData?.error || 'auth_failed',
