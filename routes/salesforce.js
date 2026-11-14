@@ -359,7 +359,9 @@ router.post('/connect-direct', requireAuth, async (req, res) => {
     // Determine login endpoint (support custom domain or standard login)
     let loginEndpoint = 'https://login.salesforce.com';
     if (customDomain && customDomain.trim()) {
-      let clean = customDomain.trim().replace(/^https?:\/\//i, '').replace(/\/+$/, '');
+      let clean = customDomain.trim().replace(/^https?:\/\//i, '').trim();
+      clean = clean.split('/')[0].split('?')[0]; // strip any trailing path or query params
+      clean = clean.replace(/\.lightning\.force\.com$/i, '.my.salesforce.com');
       if (!clean.includes('.')) {
         clean = `${clean}.my.salesforce.com`;
       }
