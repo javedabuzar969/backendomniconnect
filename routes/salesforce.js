@@ -337,6 +337,135 @@ router.get('/oauth/callback', async (req, res) => {
   }
 });
 
+// ── POST /api/integrations/salesforce/connect-direct ─────────────────────────
+// Direct OAuth 2.0 Username-Password flow:
+// Connects any client's Salesforce Org directly without requiring them to set up an External Client App.
+router.post('/connect-direct', requireAuth, async (req, res) => {
+  try {
+    const workspaceId = req.workspaceId;
+    const userId = req.userId;
+    if (!workspaceId) {
+      return res.status(400).json({ success: false, error: 'Workspace context missing' });
+    }
+
+    const { username, password, securityToken, customDomain } = req.body;
+    if (!username || !username.trim()) {
+      return res.status(400).json({ success: false, error: 'Salesforce username is required' });
+    }
+    if (!password) {
+      return res.status(400).json({ success: false, error: 'Salesforce password is required' });
+    }
+
+    // Determine login endpoint (support custom domain or standard login)
+    let loginEndpoint = 'https://login.salesforce.com';
+    if (customDomain && customDomain.trim()) {
+      let clean = customDomain.trim().replace(/^https?:\/\//i, '').replace(/\/+$/, '');
+      if (!clean.includes('.')) {
+        clean = `${clean}.my.salesforce.com`;
+      }
+      loginEndpoint = `https://${clean}`;
+    }
+
+    // Combine password + securityToken (Salesforce requirement for direct API OAuth)
+    const combinedPassword = securityToken ? `${password}${securityToken.trim()}` : password;
+
+    const clientId = process.env.SALESFORCE_CLIENT_ID?.trim();
+    const clientSecret = process.env.SALESFORCE_CLIENT_SECRET?.trim();
+
+    if (!clientId || !clientSecret) {
+      return res.status(500).json({
+        success: false,
+        error: 'Server Salesforce Client ID or Secret is not configured in environment.',
+      });
+    }
+
+    console.log(`[Salesforce Direct Connect] Attempting direct OAuth for user ${username.trim()} at ${loginEndpoint}`);
+
+    const tokenParams = new URLSearchParams({
+      grant_type: 'password',
+      client_id: clientId,
+      client_secret: clientSecret,
+      username: username.trim(),
+      password: combinedPassword,
+    });
+
+    let tokenResponse;
+    try {
+      tokenResponse = await axios.post(
+        `${loginEndpoint}/services/oauth2/token`,
+        tokenParams.toString(),
+        {
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+          timeout: 20000,
+        }
+      );
+    } catch (authErr) {
+      const errorData = authErr.response?.data;
+      const errorDesc = errorData?.error_description || authErr.message;
+      console.error('[Salesforce Direct Auth Failed]:', errorData || authErr.message);
+
+      let friendlyMsg = errorDesc;
+      if (errorData?.error === 'invalid_grant') {
+        friendlyMsg = 'Invalid username, password, or security token. If your IP is not trusted in Salesforce, a Security Token is required appended to your password.';
+      }
+      return res.status(401).json({
+        success: false,
+        error: friendlyMsg,
+        code: errorData?.error || 'auth_failed',
+      });
+    }
+
+    const {
+      access_token: accessToken,
+      instance_url: instanceUrl,
+      token_type: tokenType,
+      issued_at: issuedAt,
+      id: identityUrl,
+    } = tokenResponse.data;
+
+    if (!accessToken || !instanceUrl) {
+      throw new Error('Salesforce response did not return a valid access token or instance URL.');
+    }
+
+    // Fetch Organization ID from Identity URL
+    let orgId = null;
+    try {
+      const idRes = await axios.get(identityUrl, {
+        headers: { Authorization: `Bearer ${accessToken}` },
+        timeout: 8000,
+      });
+      orgId = idRes.data?.organization_id || null;
+    } catch (idErr) {
+      console.warn('[Salesforce Direct] Could not fetch org ID from identity URL:', idErr.message);
+    }
+
+    // Save connection with AES-256-GCM encrypted tokens in Supabase
+    // Note: For password flow, refresh token is typically omitted; we use stored credentials or access token.
+    await saveSalesforceConnection({
+      workspaceId,
+      userId,
+      orgId,
+      instanceUrl,
+      accessToken,
+      refreshToken: accessToken, // Store encrypted token reference
+      tokenType: tokenType || 'Bearer',
+      issuedAt: issuedAt ? String(issuedAt) : null,
+    });
+
+    console.log(`[Salesforce Direct Connected] Workspace ${workspaceId} connected to org ${orgId} at ${instanceUrl}`);
+
+    return res.json({
+      success: true,
+      message: 'Salesforce CRM successfully connected!',
+      orgId,
+      instanceUrl,
+    });
+  } catch (err) {
+    console.error('[Salesforce Direct Connect Error]', err.message);
+    return res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 // ── GET /api/integrations/salesforce/status ─────────────────────────────────
 // Returns connection status for the authenticated workspace.
 // Never returns tokens or cryptographic materials.
