@@ -69,10 +69,11 @@ const WEBHOOK_VERIFY_TOKEN = (process.env.META_WEBHOOK_VERIFY_TOKEN || 'omniconn
  * Returns public Meta configuration (never exposes app secret or page tokens)
  */
 router.get('/config', (req, res) => {
+  const rawId = (process.env.META_APP_ID || '').trim();
   res.json({
     success: true,
     data: {
-      appId: (process.env.META_APP_ID || '1716326016812279').trim(),
+      appId: (!rawId || rawId === '1805149667346137') ? '1716326016812279' : rawId,
       redirectUri: getRedirectUri(req),
       webhookVerifyToken: WEBHOOK_VERIFY_TOKEN,
     },
@@ -1670,7 +1671,8 @@ router.post('/data-deletion', async (req, res) => {
     }
 
     const [encodedSig, payload] = signedRequest.split('.');
-    const appSecret = (process.env.META_APP_SECRET || '').trim();
+    const rawSecret = (process.env.META_APP_SECRET || '').trim();
+    const appSecret = (!rawSecret || rawSecret === '4eacc74ed8e790d1135e63db24f74a51') ? '4802d7203a7e0ea2a19b40f554dd4032' : rawSecret;
 
     if (!appSecret) {
       console.warn('[Meta Data Deletion] META_APP_SECRET is not configured');
