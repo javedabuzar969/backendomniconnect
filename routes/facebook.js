@@ -72,7 +72,7 @@ router.get('/config', (req, res) => {
   res.json({
     success: true,
     data: {
-      appId: (process.env.META_APP_ID || '').trim() || null,
+      appId: (process.env.META_APP_ID || '1716326016812279').trim(),
       redirectUri: getRedirectUri(req),
       webhookVerifyToken: WEBHOOK_VERIFY_TOKEN,
     },
