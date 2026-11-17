@@ -977,8 +977,20 @@ router.get('/instagram/accounts', optionalAuth, async (req, res) => {
 
     // Fallback: If no accounts in session, check connected Facebook Pages for linked Instagram accounts
     if (igAccounts.length === 0) {
-      const connectedPages = await getConnectedPages(workspaceId, true);
-      const fbPages = connectedPages.filter((p) => !p.pageId?.startsWith('ig_') && p.accessToken);
+      let connectedPages = await getConnectedPages(workspaceId, true);
+      if (!connectedPages || connectedPages.length === 0) {
+        // Fallback to all connected pages in Supabase if workspace was default_workspace
+        const { data: dbPages } = await supabase.from('facebook_pages').select('*').eq('status', 'connected');
+        if (dbPages && Array.isArray(dbPages)) {
+          connectedPages = dbPages.map((p) => ({
+            pageId: p.page_id,
+            pageName: p.page_name,
+            accessToken: p.access_token,
+            pictureUrl: p.picture_url,
+          }));
+        }
+      }
+      const fbPages = (connectedPages || []).filter((p) => !p.pageId?.startsWith('ig_') && p.accessToken);
 
       for (const p of fbPages) {
         try {
@@ -1037,8 +1049,19 @@ router.post('/instagram/connect-account', optionalAuth, async (req, res) => {
 
     // Fallback: If not in state session, look up across connected Facebook Pages
     if (!targetAccount || !targetAccount.pageAccessToken) {
-      const connectedPages = await getConnectedPages(workspaceId, true);
-      const fbPages = connectedPages.filter((p) => !p.pageId?.startsWith('ig_') && p.accessToken);
+      let connectedPages = await getConnectedPages(workspaceId, true);
+      if (!connectedPages || connectedPages.length === 0) {
+        const { data: dbPages } = await supabase.from('facebook_pages').select('*').eq('status', 'connected');
+        if (dbPages && Array.isArray(dbPages)) {
+          connectedPages = dbPages.map((p) => ({
+            pageId: p.page_id,
+            pageName: p.page_name,
+            accessToken: p.access_token,
+            pictureUrl: p.picture_url,
+          }));
+        }
+      }
+      const fbPages = (connectedPages || []).filter((p) => !p.pageId?.startsWith('ig_') && p.accessToken);
 
       for (const p of fbPages) {
         try {
