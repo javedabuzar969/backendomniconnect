@@ -292,7 +292,20 @@ router.get('/pages', optionalAuth, async (req, res) => {
     const { state } = req.query;
     const workspaceId = req.workspaceId || 'default_workspace';
 
-    const connectedPages = await getConnectedPages(workspaceId, false);
+    let rawConnectedPages = await getConnectedPages(workspaceId, false);
+    if (!rawConnectedPages || rawConnectedPages.length === 0) {
+      const { data: dbPages } = await supabase.from('facebook_pages').select('*').eq('status', 'connected');
+      rawConnectedPages = (dbPages || []).map((p) => ({
+        pageId: p.page_id,
+        pageName: p.page_name,
+        category: p.category,
+        pictureUrl: p.picture_url,
+      }));
+    }
+    // Filter out Instagram: /pages is for Facebook Pages ONLY!
+    const connectedPages = (rawConnectedPages || []).filter(
+      (p) => !p.pageId?.startsWith('ig_') && p.category !== 'Instagram'
+    );
 
     let availablePages = [];
     let hasOAuthSession = false;
@@ -301,16 +314,18 @@ router.get('/pages', optionalAuth, async (req, res) => {
       const session = await getOAuthSession(state);
       if (session && Array.isArray(session.realPages)) {
         hasOAuthSession = true;
-        availablePages = session.realPages.map((p) => {
-          const isConnected = connectedPages.some((cp) => cp.pageId === p.id || cp.id === p.id);
-          return {
-            id: p.id,
-            name: p.name,
-            category: p.category,
-            picture: p.picture,
-            connected: isConnected,
-          };
-        });
+        availablePages = session.realPages
+          .filter((p) => !p.id?.startsWith('ig_') && p.category !== 'Instagram')
+          .map((p) => {
+            const isConnected = connectedPages.some((cp) => cp.pageId === p.id || cp.id === p.id);
+            return {
+              id: p.id,
+              name: p.name,
+              category: p.category,
+              picture: p.picture,
+              connected: isConnected,
+            };
+          });
       }
     }
 
