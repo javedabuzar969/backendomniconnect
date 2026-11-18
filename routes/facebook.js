@@ -574,17 +574,32 @@ router.post('/webhook', async (req, res) => {
 
     const body = req.body;
 
+    // Normalize direct field/value test sample if entry is not wrapped
+    if (!body?.entry && (body?.field || body?.sample?.field)) {
+      const fieldData = body.sample || body;
+      body.entry = [{
+        id: fieldData.value?.recipient?.id || '0',
+        messaging: [fieldData.value],
+      }];
+    }
+
     // ── Facebook Messenger Events ─────────────────────────────────────────
     if (body.object === 'page') {
       for (const entry of body.entry || []) {
         const pageId = entry.id;
+        const messagingEvents = entry.messaging || (entry.changes ? entry.changes.map(c => c.value) : []);
 
-        for (const event of entry.messaging || []) {
+        for (const event of messagingEvents) {
           const senderId = event.sender?.id;
           const recipientId = event.recipient?.id;
-          const message = event.message;
+          const rawMessage = event.message;
+          const postback = event.postback;
+          const message = rawMessage || (postback ? {
+            mid: postback.mid || `fb_pb_${Date.now()}_${Math.random().toString(36).substring(7)}`,
+            text: postback.title || postback.payload || '[Button Clicked: ' + (postback.title || 'Postback') + ']',
+          } : null);
 
-          const isEcho = Boolean(message?.is_echo);
+          const isEcho = Boolean(rawMessage?.is_echo);
           const customerPsid = isEcho ? recipientId : senderId;
           const direction = isEcho ? 'outbound' : 'inbound';
           const status = isEcho ? 'sent' : 'delivered';
@@ -682,16 +697,22 @@ router.post('/webhook', async (req, res) => {
     if (body.object === 'instagram') {
       for (const entry of body.entry || []) {
         const igPageId = entry.id; // Instagram Business Account ID
+        const messagingEvents = entry.messaging || (entry.changes ? entry.changes.map(c => c.value) : []);
 
-        for (const event of entry.messaging || []) {
+        for (const event of messagingEvents) {
           const senderId = event.sender?.id;
-          const message = event.message;
+          const rawMessage = event.message;
+          const postback = event.postback;
+          const message = rawMessage || (postback ? {
+            mid: postback.mid || `ig_pb_${Date.now()}_${Math.random().toString(36).substring(7)}`,
+            text: postback.title || postback.payload || '[Button Clicked: ' + (postback.title || 'Postback') + ']',
+          } : null);
 
           if (senderId && message) {
             const messageId = message.mid;
             const messageText = message.text;
             const attachments = message.attachments;
-            const isEcho = Boolean(message.is_echo);
+            const isEcho = Boolean(rawMessage?.is_echo);
             const customerId = isEcho ? event.recipient?.id : senderId;
             const direction = isEcho ? 'outbound' : 'inbound';
             const status = isEcho ? 'sent' : 'delivered';
