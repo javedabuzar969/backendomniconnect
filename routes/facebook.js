@@ -296,16 +296,24 @@ router.get('/pages', optionalAuth, async (req, res) => {
     if (!rawConnectedPages || rawConnectedPages.length === 0) {
       const { data: dbPages } = await supabase.from('facebook_pages').select('*').eq('status', 'connected');
       rawConnectedPages = (dbPages || []).map((p) => ({
+        id: p.page_id,
         pageId: p.page_id,
+        name: p.page_name,
         pageName: p.page_name,
         category: p.category,
+        picture: p.picture_url,
         pictureUrl: p.picture_url,
+        status: p.status,
       }));
     }
-    // Filter out Instagram: /pages is for Facebook Pages ONLY!
-    const connectedPages = (rawConnectedPages || []).filter(
+
+    // Separate Facebook Pages vs Instagram
+    const fbConnectedPages = (rawConnectedPages || []).filter(
       (p) => !p.pageId?.startsWith('ig_') && p.category !== 'Instagram'
     );
+    const igConnectedPage = (rawConnectedPages || []).find(
+      (p) => (p.pageId?.startsWith('ig_') || p.category === 'Instagram') && p.status === 'connected'
+    ) || null;
 
     let availablePages = [];
     let hasOAuthSession = false;
@@ -317,7 +325,7 @@ router.get('/pages', optionalAuth, async (req, res) => {
         availablePages = session.realPages
           .filter((p) => !p.id?.startsWith('ig_') && p.category !== 'Instagram')
           .map((p) => {
-            const isConnected = connectedPages.some((cp) => cp.pageId === p.id || cp.id === p.id);
+            const isConnected = fbConnectedPages.some((cp) => cp.pageId === p.id || cp.id === p.id);
             return {
               id: p.id,
               name: p.name,
@@ -332,11 +340,13 @@ router.get('/pages', optionalAuth, async (req, res) => {
     res.json({
       success: true,
       hasOAuthSession,
-      connectedPages,
+      connectedPages: rawConnectedPages,
+      facebookPages: fbConnectedPages,
+      connectedInstagram: igConnectedPage,
       availablePages,
-      pages: availablePages.length > 0 ? availablePages : connectedPages,
-      count: availablePages.length > 0 ? availablePages.length : connectedPages.length,
-      connectedCount: connectedPages.length,
+      pages: availablePages.length > 0 ? availablePages : fbConnectedPages,
+      count: availablePages.length > 0 ? availablePages.length : fbConnectedPages.length,
+      connectedCount: fbConnectedPages.length,
     });
   } catch (err) {
     console.error('[Facebook Get Pages Error]:', err.message);
