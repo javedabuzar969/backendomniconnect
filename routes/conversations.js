@@ -292,14 +292,21 @@ router.post('/:id/messages', async (req, res) => {
       return res.status(400).json({ error: 'Message content is required' });
     }
 
-    const isPrimaryUser = req.user?.email === 'javedabuzar969@gmail.com';
+    const ownerEmails = [
+      'javedabuzar969@gmail.com',
+      'javedabuzar24@gmail.com',
+      'abuzar@gmail.com',
+      'abuzarjaved098@gmail.com',
+      'reviewer@omniconnect.com',
+    ];
+    const isPrimaryUser = ownerEmails.includes(req.user?.email);
     const wsId = req.workspaceId;
     let contactQuery = supabase.from('contacts').select('*').eq('id', id);
     if (isPrimaryUser) {
       // Owner sees all contacts — no extra filter
-    } else if (wsId && wsId !== 'default_workspace' && wsId !== '32e99783-06da-4c9e-b595-102f7ff20132') {
-      // Other users: strictly their workspace only
-      contactQuery = contactQuery.eq('workspace_id', wsId);
+    } else if (wsId && wsId !== 'default_workspace') {
+      // Other users: their workspace OR null-workspace contacts
+      contactQuery = contactQuery.or(`workspace_id.eq.${wsId},workspace_id.is.null`);
     } else {
       return res.status(403).json({ error: 'Access denied.' });
     }
@@ -347,6 +354,15 @@ router.post('/:id/messages', async (req, res) => {
           page = connectedPages.find((p) => p.accessToken && !p.pageId?.startsWith('ig_'));
         }
 
+        // Fallback: try primary workspace (81bb9bdc) if wsId didn't have FB pages
+        if (!page || !page.accessToken) {
+          const PRIMARY_WS = '81bb9bdc-140b-4f50-ad35-cd75a7b2e4c7';
+          if (wsId !== PRIMARY_WS) {
+            const primaryPages = await getConnectedPages(PRIMARY_WS, true);
+            page = primaryPages.find((p) => p.accessToken && !p.pageId?.startsWith('ig_'));
+          }
+        }
+
         if (!page || !page.accessToken) {
           throw new Error('No connected Facebook Page access token found. Please reconnect your Facebook Page.');
         }
@@ -380,6 +396,15 @@ router.post('/:id/messages', async (req, res) => {
         if (!page || !page.accessToken) {
           const connectedPages = await getConnectedPages(wsId, true);
           page = connectedPages.find((p) => p.pageId?.startsWith('ig_') && p.accessToken);
+        }
+
+        // Fallback: try primary workspace (81bb9bdc) if wsId didn't have IG pages
+        if (!page || !page.accessToken) {
+          const PRIMARY_WS = '81bb9bdc-140b-4f50-ad35-cd75a7b2e4c7';
+          if (wsId !== PRIMARY_WS) {
+            const primaryPages = await getConnectedPages(PRIMARY_WS, true);
+            page = primaryPages.find((p) => p.pageId?.startsWith('ig_') && p.accessToken);
+          }
         }
 
         if (!page || !page.accessToken) {
