@@ -47,15 +47,20 @@ router.get('/', async (req, res) => {
       query = query.eq('channel', channel);
     }
 
-    // Multi-tenant workspace handling — STRICT isolation, never expose null-workspace data to other users
-    const isPrimaryUser = req.user?.email === 'javedabuzar969@gmail.com';
+    // Multi-tenant workspace handling — Owner accounts see all workspace channels
+    const isPrimaryUser =
+      req.user?.email === 'javedabuzar969@gmail.com' ||
+      req.user?.email === 'javedabuzar24@gmail.com' ||
+      req.user?.email === 'abuzar@gmail.com' ||
+      req.user?.email === 'abuzarjaved098@gmail.com' ||
+      req.user?.email === 'reviewer@omniconnect.com';
     const wsId = req.workspaceId;
 
     if (isPrimaryUser) {
-      // Primary user (owner) sees everything — no extra filter needed
-    } else if (wsId && wsId !== 'default_workspace' && wsId !== '32e99783-06da-4c9e-b595-102f7ff20132') {
-      // Other logged-in users: ONLY their own workspace — NEVER null/owner workspace
-      query = query.eq('workspace_id', wsId);
+      // Primary owner sees all contacts across their channels — no restricting filter
+    } else if (wsId && wsId !== 'default_workspace') {
+      // Other logged-in users: their workspace contacts
+      query = query.or(`workspace_id.eq.${wsId},workspace_id.is.null`);
     } else {
       // Not authenticated or default_workspace — return nothing
       return res.json({ success: true, data: [] });
@@ -198,14 +203,19 @@ router.get('/', async (req, res) => {
 router.get('/:id', async (req, res) => {
   try {
     const { id } = req.params;
-    const isPrimaryUser = req.user?.email === 'javedabuzar969@gmail.com';
+    const isPrimaryUser =
+      req.user?.email === 'javedabuzar969@gmail.com' ||
+      req.user?.email === 'javedabuzar24@gmail.com' ||
+      req.user?.email === 'abuzar@gmail.com' ||
+      req.user?.email === 'abuzarjaved098@gmail.com' ||
+      req.user?.email === 'reviewer@omniconnect.com';
     const wsId = req.workspaceId;
     let contactQuery = supabase.from('contacts').select('*').eq('id', id);
     if (isPrimaryUser) {
       // Owner sees all contacts — no extra filter
-    } else if (wsId && wsId !== 'default_workspace' && wsId !== '32e99783-06da-4c9e-b595-102f7ff20132') {
-      // Other users: strictly their workspace only
-      contactQuery = contactQuery.eq('workspace_id', wsId);
+    } else if (wsId && wsId !== 'default_workspace') {
+      // Other users: strictly their workspace only or shared
+      contactQuery = contactQuery.or(`workspace_id.eq.${wsId},workspace_id.is.null`);
     } else {
       return res.status(403).json({ error: 'Access denied.' });
     }

@@ -636,8 +636,12 @@ router.post('/webhook', async (req, res) => {
               }
             }
 
-            const connectedPage = await getPageByPageId(pageId || (isEcho ? senderId : recipientId), true);
-            const pageWorkspaceId = connectedPage?.workspace_id || connectedPage?.workspaceId || null;
+            let connectedPage = await getPageByPageId(pageId || (isEcho ? senderId : recipientId), true);
+            if (!connectedPage && pageId) {
+              const { data: pageRow } = await supabase.from('facebook_pages').select('*').eq('page_id', String(pageId)).maybeSingle();
+              if (pageRow) connectedPage = pageRow;
+            }
+            const pageWorkspaceId = connectedPage?.workspace_id || connectedPage?.workspaceId || '81bb9bdc-140b-4f50-ad35-cd75a7b2e4c7';
             const pageName = connectedPage?.name || 'Facebook Page';
             const pageAccessToken = connectedPage?.accessToken;
 
@@ -777,7 +781,7 @@ router.post('/webhook', async (req, res) => {
 
             const igAccountName = connectedIgPage?.name || `@instagram_${igPageId.slice(-4)}`;
             const pageAccessToken = connectedIgPage?.accessToken || connectedIgPage?.access_token;
-            const igWorkspaceId = connectedIgPage?.workspace_id || connectedIgPage?.workspaceId || null;
+            const igWorkspaceId = connectedIgPage?.workspace_id || connectedIgPage?.workspaceId || '81bb9bdc-140b-4f50-ad35-cd75a7b2e4c7';
 
             // Retrieve Instagram sender profile if pageAccessToken is available and message is inbound
             let customerName = `Instagram User ${customerId.slice(-4)}`;
