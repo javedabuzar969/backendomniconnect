@@ -603,15 +603,27 @@ router.post('/webhook', async (req, res) => {
           const customerPsid = isEcho ? recipientId : senderId;
           const direction = isEcho ? 'outbound' : 'inbound';
           const status = isEcho ? 'sent' : 'delivered';
-          const originalTimestamp = event.timestamp ? new Date(event.timestamp).toISOString() : null;
+          let originalTimestamp = event.timestamp ? new Date(event.timestamp > 1e11 ? event.timestamp : event.timestamp * 1000).toISOString() : new Date().toISOString();
+          if (new Date(originalTimestamp).getFullYear() < 2024) {
+            originalTimestamp = new Date().toISOString();
+          }
 
           if (customerPsid && message) {
-            const messageId = message.mid;
+            let messageId = message.mid;
+            const isSampleMid = messageId && (
+              messageId.includes('aWdfZAG1faXRlbT') ||
+              messageId.includes('1457764197618') ||
+              messageId.startsWith('sample_')
+            );
+            if (isSampleMid) {
+              messageId = `${messageId}_${Date.now()}`;
+            }
+
             const messageText = message.text;
             const attachments = message.attachments;
 
             // Idempotency check: prevent duplicate messages
-            if (messageId) {
+            if (messageId && !isSampleMid) {
               const { data: existingMsg } = await supabase
                 .from('messages')
                 .select('id')
@@ -709,19 +721,31 @@ router.post('/webhook', async (req, res) => {
           } : null);
 
           if (senderId && message) {
-            const messageId = message.mid;
+            let messageId = message.mid;
+            const isSampleMid = messageId && (
+              messageId.includes('aWdfZAG1faXRlbT') ||
+              messageId.includes('1457764197618') ||
+              messageId.startsWith('sample_')
+            );
+            if (isSampleMid) {
+              messageId = `${messageId}_${Date.now()}`;
+            }
+
             const messageText = message.text;
             const attachments = message.attachments;
             const isEcho = Boolean(rawMessage?.is_echo);
             const customerId = isEcho ? event.recipient?.id : senderId;
             const direction = isEcho ? 'outbound' : 'inbound';
             const status = isEcho ? 'sent' : 'delivered';
-            const originalTimestamp = event.timestamp ? new Date(event.timestamp).toISOString() : null;
+            let originalTimestamp = event.timestamp ? new Date(event.timestamp > 1e11 ? event.timestamp : event.timestamp * 1000).toISOString() : new Date().toISOString();
+            if (new Date(originalTimestamp).getFullYear() < 2024) {
+              originalTimestamp = new Date().toISOString();
+            }
 
             if (!customerId) continue;
 
             // Idempotency check: prevent duplicate messages
-            if (messageId) {
+            if (messageId && !isSampleMid) {
               const { data: existingMsg } = await supabase
                 .from('messages')
                 .select('id')
