@@ -1,5 +1,10 @@
 // backend/server.js — Main Express Server
 import 'dotenv/config';
+
+if (!process.env.JWT_SECRET) {
+  throw new Error('FATAL: JWT_SECRET environment variable is missing.');
+}
+
 import express from 'express';
 import cors from 'cors';
 import authRouter from './routes/auth.js';

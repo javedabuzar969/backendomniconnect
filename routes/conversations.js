@@ -108,6 +108,7 @@ router.get('/', async (req, res) => {
       const { data: msgs, error: mErr } = await supabase
         .from('messages')
         .select('*')
+        .eq('workspace_id', wsId)
         .or(orConditions.join(','))
         .order('created_at', { ascending: true });
 
@@ -229,6 +230,7 @@ router.get('/:id', async (req, res) => {
     const { data: msgs } = await supabase
       .from('messages')
       .select('*')
+      .eq('workspace_id', wsId)
       .or(`contact_id.eq.${contact.id},phone_number.eq.${contact.phone_number}`)
       .order('created_at', { ascending: true });
 
@@ -354,15 +356,6 @@ router.post('/:id/messages', async (req, res) => {
           page = connectedPages.find((p) => p.accessToken && !p.pageId?.startsWith('ig_'));
         }
 
-        // Fallback: try primary workspace (81bb9bdc) if wsId didn't have FB pages
-        if (!page || !page.accessToken) {
-          const PRIMARY_WS = '81bb9bdc-140b-4f50-ad35-cd75a7b2e4c7';
-          if (wsId !== PRIMARY_WS) {
-            const primaryPages = await getConnectedPages(PRIMARY_WS, true);
-            page = primaryPages.find((p) => p.accessToken && !p.pageId?.startsWith('ig_'));
-          }
-        }
-
         if (!page || !page.accessToken) {
           throw new Error('No connected Facebook Page access token found. Please reconnect your Facebook Page.');
         }
@@ -396,15 +389,6 @@ router.post('/:id/messages', async (req, res) => {
         if (!page || !page.accessToken) {
           const connectedPages = await getConnectedPages(wsId, true);
           page = connectedPages.find((p) => p.pageId?.startsWith('ig_') && p.accessToken);
-        }
-
-        // Fallback: try primary workspace (81bb9bdc) if wsId didn't have IG pages
-        if (!page || !page.accessToken) {
-          const PRIMARY_WS = '81bb9bdc-140b-4f50-ad35-cd75a7b2e4c7';
-          if (wsId !== PRIMARY_WS) {
-            const primaryPages = await getConnectedPages(PRIMARY_WS, true);
-            page = primaryPages.find((p) => p.pageId?.startsWith('ig_') && p.accessToken);
-          }
         }
 
         if (!page || !page.accessToken) {

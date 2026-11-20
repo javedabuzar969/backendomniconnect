@@ -13,7 +13,7 @@ import {
   saveMessage,
   updateMessageStatusByWamid,
 } from '../lib/supabase.js';
-import { optionalAuth } from './auth.js';
+import { optionalAuth, requireAuth } from './auth.js';
 
 const router = Router();
 
@@ -201,13 +201,15 @@ router.get('/templates', optionalAuth, async (req, res) => {
   }
 });
 
-router.get('/messages', optionalAuth, async (req, res) => {
+router.get('/messages', requireAuth, async (req, res) => {
   try {
+    const wsId = req.workspaceId;
     const { phoneNumber, limit = 50, offset = 0 } = req.query;
 
     let query = supabase
       .from('messages')
       .select('*, contacts(name, phone_number, tags)')
+      .eq('workspace_id', wsId)
       .order('created_at', { ascending: false })
       .range(Number(offset), Number(offset) + Number(limit) - 1);
 
@@ -224,18 +226,16 @@ router.get('/messages', optionalAuth, async (req, res) => {
   }
 });
 
-router.get('/contacts', optionalAuth, async (req, res) => {
+router.get('/contacts', requireAuth, async (req, res) => {
   try {
+    const wsId = req.workspaceId;
     const { search, limit = 100 } = req.query;
     let query = supabase
       .from('contacts')
       .select('*')
+      .eq('workspace_id', wsId)
       .order('last_interaction_at', { ascending: false })
       .limit(Number(limit));
-
-    if (req.user?.email !== 'javedabuzar969@gmail.com' && req.workspaceId) {
-      query = query.eq('workspace_id', req.workspaceId);
-    }
 
     if (search) {
       query = query.or(`name.ilike.%${search}%,phone_number.ilike.%${search}%`);
@@ -250,8 +250,9 @@ router.get('/contacts', optionalAuth, async (req, res) => {
   }
 });
 
-router.post('/contacts', optionalAuth, async (req, res) => {
+router.post('/contacts', requireAuth, async (req, res) => {
   try {
+    const wsId = req.workspaceId;
     const { phoneNumber, name, tags, email } = req.body;
     if (!phoneNumber) {
       return res.status(400).json({ success: false, error: 'phoneNumber is required' });
@@ -261,10 +262,11 @@ router.post('/contacts', optionalAuth, async (req, res) => {
       phoneNumber,
       name,
       tags: tags || ['Lead'],
+      workspaceId: wsId,
     });
 
     if (email) {
-      await supabase.from('contacts').update({ email }).eq('id', contact.id);
+      await supabase.from('contacts').update({ email }).eq('id', contact.id).eq('workspace_id', wsId);
     }
 
     res.json({ success: true, data: contact });

@@ -5,18 +5,16 @@ import jwt from 'jsonwebtoken';
 import { supabase } from '../lib/supabase.js';
 
 const router = Router();
-const JWT_SECRET = process.env.JWT_SECRET || 'omniconnect_secret_2026';
+const JWT_SECRET = process.env.JWT_SECRET;
+if (!JWT_SECRET) {
+  throw new Error('FATAL: JWT_SECRET environment variable is missing.');
+}
 
 /**
  * Resolves or creates an isolated workspace for a user
  */
 export async function resolveUserWorkspace(user) {
-  if (!user?.id) return 'default_workspace';
-
-  // Primary user gets their dedicated legacy/primary workspace
-  if (user.email === 'javedabuzar969@gmail.com') {
-    return '32e99783-06da-4c9e-b595-102f7ff20132';
-  }
+  if (!user?.id) return null;
 
   try {
     // 1. Try finding workspace from workspace_members table
@@ -72,8 +70,8 @@ export async function resolveUserWorkspace(user) {
     console.warn('[Auth Workspace Resolution]', err.message);
   }
 
-  // Fallback: Each user's ID acts as their strict deterministic isolated workspace
-  return user.id;
+  // Fallback: cannot determine workspace
+  return null;
 }
 
 // ── Middleware: verify JWT & inject tenant context ─────────
@@ -86,7 +84,10 @@ export function requireAuth(req, res, next) {
     const decoded = jwt.verify(auth.split(' ')[1], JWT_SECRET);
     req.user = decoded;
     req.userId = decoded.userId;
-    req.workspaceId = decoded.workspaceId || decoded.userId;
+    req.workspaceId = decoded.workspaceId;
+    if (!req.workspaceId) {
+      return res.status(401).json({ error: 'Unauthorized: valid workspace session required' });
+    }
     next();
   } catch {
     res.status(401).json({ error: 'Your session has expired. Please sign in again.' });
@@ -100,7 +101,7 @@ export function optionalAuth(req, res, next) {
       const decoded = jwt.verify(auth.split(' ')[1], JWT_SECRET);
       req.user = decoded;
       req.userId = decoded.userId;
-      req.workspaceId = decoded.workspaceId || decoded.userId;
+      req.workspaceId = decoded.workspaceId || null;
     } catch {}
   }
   next();

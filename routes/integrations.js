@@ -15,23 +15,19 @@ router.use(requireAuth);
  */
 router.get('/whatsapp', async (req, res) => {
   try {
-    const isPrimaryUser = req.user?.email === 'javedabuzar969@gmail.com';
     const wsId = req.workspaceId;
+    if (!wsId) return res.status(401).json({ error: 'Unauthorized: workspace session required' });
 
-    let query = supabase
+    const { data: dbSettings } = await supabase
       .from('whatsapp_settings')
       .select('*')
       .eq('is_active', true)
+      .eq('workspace_id', wsId)
       .order('created_at', { ascending: false });
 
-    if (!isPrimaryUser && wsId) {
-      query = query.eq('workspace_id', wsId);
-    }
-
-    const { data: dbSettings } = await query;
     const activeRecord = dbSettings?.[0];
 
-    if (!activeRecord && !isPrimaryUser) {
+    if (!activeRecord) {
       return res.json({ success: true, data: [] });
     }
 

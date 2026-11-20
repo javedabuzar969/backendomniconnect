@@ -564,12 +564,7 @@ router.post('/sync-contacts', requireAuth, async (req, res) => {
     const instanceUrl = tokens.instanceUrl || connection.instance_url;
 
     // 3. Fetch contacts from Supabase
-    let query = supabase.from('contacts').select('*');
-    if (workspaceId === '32e99783-06da-4c9e-b595-102f7ff20132') {
-      query = query.or('workspace_id.eq.32e99783-06da-4c9e-b595-102f7ff20132,workspace_id.is.null');
-    } else {
-      query = query.eq('workspace_id', workspaceId);
-    }
+    let query = supabase.from('contacts').select('*').eq('workspace_id', workspaceId);
 
     const { data: contacts, error: contactsErr } = await query;
     if (contactsErr) {

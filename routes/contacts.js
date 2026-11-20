@@ -1,15 +1,12 @@
 // backend/routes/contacts.js — Contacts CRUD API with Supabase
 import { Router } from 'express';
 import { supabase } from '../lib/supabase.js';
-import { optionalAuth } from './auth.js';
-
-const OWNER_EMAIL = 'javedabuzar969@gmail.com';
-const OWNER_WORKSPACE = '32e99783-06da-4c9e-b595-102f7ff20132';
+import { requireAuth } from './auth.js';
 
 const router = Router();
 
 // Apply auth to all routes
-router.use(optionalAuth);
+router.use(requireAuth);
 
 // ─── Helper: Normalize contact row from DB → frontend shape ───────────────────
 function normalizeContact(row) {
@@ -44,25 +41,17 @@ router.get('/', async (req, res) => {
     const { q, channel, limit = 200, offset = 0 } = req.query;
 
     // ── Strict workspace isolation ──────────────────────────────────────────
-    const isPrimaryUser = req.user?.email === OWNER_EMAIL;
     const wsId = req.workspaceId;
+    if (!wsId || wsId === 'default_workspace') {
+      return res.status(401).json({ error: 'Unauthorized: valid workspace required' });
+    }
 
     let query = supabase
       .from('contacts')
       .select('*')
+      .eq('workspace_id', wsId)
       .order('created_at', { ascending: false })
       .range(Number(offset), Number(offset) + Number(limit) - 1);
-
-    if (isPrimaryUser) {
-      // Owner sees all their contacts (workspace = owner workspace OR null legacy)
-      query = query.or(`workspace_id.eq.${OWNER_WORKSPACE},workspace_id.is.null`);
-    } else if (wsId && wsId !== 'default_workspace' && wsId !== OWNER_WORKSPACE) {
-      // Other users: ONLY their own workspace — never see owner's data
-      query = query.eq('workspace_id', wsId);
-    } else {
-      // No auth / default workspace → return empty
-      return res.json({ contacts: [], total: 0 });
-    }
 
     if (channel && channel !== 'all') {
       query = query.eq('channel', channel);
@@ -85,18 +74,12 @@ router.get('/', async (req, res) => {
 // ─── GET /api/contacts/:id — Get single contact ───────────────────────────────
 router.get('/:id', async (req, res) => {
   try {
-    const isPrimaryUser = req.user?.email === OWNER_EMAIL;
     const wsId = req.workspaceId;
-
-    let query = supabase.from('contacts').select('*').eq('id', req.params.id);
-
-    if (isPrimaryUser) {
-      // owner can access any contact
-    } else if (wsId && wsId !== 'default_workspace' && wsId !== OWNER_WORKSPACE) {
-      query = query.eq('workspace_id', wsId);
-    } else {
-      return res.status(403).json({ error: 'Access denied' });
+    if (!wsId || wsId === 'default_workspace') {
+      return res.status(401).json({ error: 'Unauthorized: valid workspace required' });
     }
+
+    let query = supabase.from('contacts').select('*').eq('id', req.params.id).eq('workspace_id', wsId);
 
     const { data, error } = await query.maybeSingle();
     if (error) throw error;
@@ -124,11 +107,11 @@ router.post('/', async (req, res) => {
     } = req.body;
 
     // Assign workspace from auth token
-    const isPrimaryUser = req.user?.email === OWNER_EMAIL;
     const wsId = req.workspaceId;
-    const assignedWorkspace = isPrimaryUser
-      ? OWNER_WORKSPACE
-      : (wsId && wsId !== 'default_workspace' ? wsId : null);
+    if (!wsId || wsId === 'default_workspace') {
+      return res.status(401).json({ error: 'Unauthorized: valid workspace required' });
+    }
+    const assignedWorkspace = wsId;
 
     const name = `${firstName.trim()} ${lastName.trim()}`.trim() || 'New Contact';
 
@@ -199,11 +182,17 @@ router.patch('/:id', async (req, res) => {
       optedInThrough, contactTime,
     } = req.body;
 
+    const wsId = req.workspaceId;
+    if (!wsId || wsId === 'default_workspace') {
+      return res.status(401).json({ error: 'Unauthorized: valid workspace required' });
+    }
+
     // Fetch current row first
     const { data: existing, error: fetchErr } = await supabase
       .from('contacts')
       .select('*')
       .eq('id', id)
+      .eq('workspace_id', wsId)
       .maybeSingle();
 
     if (fetchErr) throw fetchErr;
@@ -241,6 +230,7 @@ router.patch('/:id', async (req, res) => {
       .from('contacts')
       .update(updatePayload)
       .eq('id', id)
+      .eq('workspace_id', wsId)
       .select()
       .single();
 
@@ -255,10 +245,16 @@ router.patch('/:id', async (req, res) => {
 // ─── DELETE /api/contacts/:id — Delete contact ────────────────────────────────
 router.delete('/:id', async (req, res) => {
   try {
+    const wsId = req.workspaceId;
+    if (!wsId || wsId === 'default_workspace') {
+      return res.status(401).json({ error: 'Unauthorized: valid workspace required' });
+    }
+
     const { error } = await supabase
       .from('contacts')
       .delete()
-      .eq('id', req.params.id);
+      .eq('id', req.params.id)
+      .eq('workspace_id', wsId);
 
     if (error) throw error;
     res.json({ success: true });
@@ -271,6 +267,11 @@ router.delete('/:id', async (req, res) => {
 // ─── POST /api/contacts/bulk — Bulk actions ───────────────────────────────────
 router.post('/bulk', async (req, res) => {
   try {
+    const wsId = req.workspaceId;
+    if (!wsId || wsId === 'default_workspace') {
+      return res.status(401).json({ error: 'Unauthorized: valid workspace required' });
+    }
+
     const { ids, action, payload = {} } = req.body;
     if (!ids || !Array.isArray(ids) || ids.length === 0) {
       return res.status(400).json({ error: 'ids array is required' });
@@ -283,10 +284,10 @@ router.post('/bulk', async (req, res) => {
       if (!tag) return res.status(400).json({ error: 'tag is required' });
 
       for (const id of ids) {
-        const { data: row } = await supabase.from('contacts').select('tags').eq('id', id).maybeSingle();
+        const { data: row } = await supabase.from('contacts').select('tags').eq('id', id).eq('workspace_id', wsId).maybeSingle();
         if (row) {
           const newTags = Array.from(new Set([...(row.tags || []), tag]));
-          const { data } = await supabase.from('contacts').update({ tags: newTags }).eq('id', id).select().single();
+          const { data } = await supabase.from('contacts').update({ tags: newTags }).eq('id', id).eq('workspace_id', wsId).select().single();
           if (data) results.push(normalizeContact(data));
         }
       }
@@ -295,10 +296,10 @@ router.post('/bulk', async (req, res) => {
       if (!tag) return res.status(400).json({ error: 'tag is required' });
 
       for (const id of ids) {
-        const { data: row } = await supabase.from('contacts').select('tags').eq('id', id).maybeSingle();
+        const { data: row } = await supabase.from('contacts').select('tags').eq('id', id).eq('workspace_id', wsId).maybeSingle();
         if (row) {
           const newTags = (row.tags || []).filter((t) => t.toLowerCase() !== tag.toLowerCase());
-          const { data } = await supabase.from('contacts').update({ tags: newTags }).eq('id', id).select().single();
+          const { data } = await supabase.from('contacts').update({ tags: newTags }).eq('id', id).eq('workspace_id', wsId).select().single();
           if (data) results.push(normalizeContact(data));
         }
       }
@@ -309,24 +310,25 @@ router.post('/bulk', async (req, res) => {
         .from('contacts')
         .update({ status })
         .in('id', ids)
+        .eq('workspace_id', wsId)
         .select();
       if (error) throw error;
       results = (data || []).map(normalizeContact);
     } else if (action === 'pauseAutomations') {
       for (const id of ids) {
-        const { data: row } = await supabase.from('contacts').select('metadata').eq('id', id).maybeSingle();
+        const { data: row } = await supabase.from('contacts').select('metadata').eq('id', id).eq('workspace_id', wsId).maybeSingle();
         if (row) {
           const meta = { ...(row.metadata || {}), automationsPaused: true };
-          const { data } = await supabase.from('contacts').update({ metadata: meta }).eq('id', id).select().single();
+          const { data } = await supabase.from('contacts').update({ metadata: meta }).eq('id', id).eq('workspace_id', wsId).select().single();
           if (data) results.push(normalizeContact(data));
         }
       }
     } else if (action === 'resumeAutomations') {
       for (const id of ids) {
-        const { data: row } = await supabase.from('contacts').select('metadata').eq('id', id).maybeSingle();
+        const { data: row } = await supabase.from('contacts').select('metadata').eq('id', id).eq('workspace_id', wsId).maybeSingle();
         if (row) {
           const meta = { ...(row.metadata || {}), automationsPaused: false };
-          const { data } = await supabase.from('contacts').update({ metadata: meta }).eq('id', id).select().single();
+          const { data } = await supabase.from('contacts').update({ metadata: meta }).eq('id', id).eq('workspace_id', wsId).select().single();
           if (data) results.push(normalizeContact(data));
         }
       }
@@ -334,25 +336,25 @@ router.post('/bulk', async (req, res) => {
       const { sequence } = payload;
       if (!sequence) return res.status(400).json({ error: 'sequence is required' });
       for (const id of ids) {
-        const { data: row } = await supabase.from('contacts').select('metadata').eq('id', id).maybeSingle();
+        const { data: row } = await supabase.from('contacts').select('metadata').eq('id', id).eq('workspace_id', wsId).maybeSingle();
         if (row) {
           const prevMeta = row.metadata || {};
           const sequences = Array.from(new Set([...(prevMeta.sequences || []), sequence]));
-          const { data } = await supabase.from('contacts').update({ metadata: { ...prevMeta, sequences } }).eq('id', id).select().single();
+          const { data } = await supabase.from('contacts').update({ metadata: { ...prevMeta, sequences } }).eq('id', id).eq('workspace_id', wsId).select().single();
           if (data) results.push(normalizeContact(data));
         }
       }
     } else if (action === 'unsubscribeSequence') {
       for (const id of ids) {
-        const { data: row } = await supabase.from('contacts').select('metadata').eq('id', id).maybeSingle();
+        const { data: row } = await supabase.from('contacts').select('metadata').eq('id', id).eq('workspace_id', wsId).maybeSingle();
         if (row) {
           const prevMeta = row.metadata || {};
-          const { data } = await supabase.from('contacts').update({ metadata: { ...prevMeta, sequences: [] } }).eq('id', id).select().single();
+          const { data } = await supabase.from('contacts').update({ metadata: { ...prevMeta, sequences: [] } }).eq('id', id).eq('workspace_id', wsId).select().single();
           if (data) results.push(normalizeContact(data));
         }
       }
     } else if (action === 'delete') {
-      const { error } = await supabase.from('contacts').delete().in('id', ids);
+      const { error } = await supabase.from('contacts').delete().in('id', ids).eq('workspace_id', wsId);
       if (error) throw error;
       return res.json({ success: true, deleted: ids.length });
     } else {

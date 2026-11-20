@@ -30,10 +30,7 @@ import {
 } from '../lib/facebookDb.js';
 import { supabase, upsertContact, saveMessage, updateMessageStatusByWamid } from '../lib/supabase.js';
 import { requireAuth } from './auth.js';
-import jwt from 'jsonwebtoken';
-
 const router = Router();
-const JWT_SECRET = process.env.JWT_SECRET || 'omniconnect_secret_2026';
 
 const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:5173';
 const BACKEND_PORT = process.env.PORT || 5000;
