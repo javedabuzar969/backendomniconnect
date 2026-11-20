@@ -198,6 +198,7 @@ router.get('/', async (req, res) => {
         pageId: contact.metadata?.pageId || null,
         pageName: contact.metadata?.pageName || null,
         lastMessage: lastMsg?.text || 'No messages yet',
+        lastMessageSender: lastMsg?.sender || null,
         time: lastMsg?.time || 'Recent',
         lastMessageAt: lastMsg?.createdAt || contact.last_interaction_at,
         unread: messageList.some((m) => m.sender === 'customer' && m.status !== 'read'),

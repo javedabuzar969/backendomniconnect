@@ -599,7 +599,7 @@ router.post('/webhook', async (req, res) => {
             text: postback.title || postback.payload || '[Button Clicked: ' + (postback.title || 'Postback') + ']',
           } : null);
 
-          const isEcho = Boolean(rawMessage?.is_echo);
+          const isEcho = Boolean(rawMessage?.is_echo) || (pageId && String(senderId) === String(pageId));
           const customerPsid = isEcho ? recipientId : senderId;
           const direction = isEcho ? 'outbound' : 'inbound';
           const status = isEcho ? 'sent' : 'delivered';
@@ -737,7 +737,7 @@ router.post('/webhook', async (req, res) => {
 
             const messageText = message.text;
             const attachments = message.attachments;
-            const isEcho = Boolean(rawMessage?.is_echo);
+            const isEcho = Boolean(rawMessage?.is_echo) || (igPageId && String(senderId) === String(igPageId));
             const customerId = isEcho ? event.recipient?.id : senderId;
             const direction = isEcho ? 'outbound' : 'inbound';
             const status = isEcho ? 'sent' : 'delivered';
