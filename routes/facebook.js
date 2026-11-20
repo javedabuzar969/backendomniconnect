@@ -438,6 +438,9 @@ router.post('/disconnect-page', requireAuth, async (req, res) => {
     if (!pageId) return res.status(400).json({ success: false, error: 'pageId is required' });
 
     const page = await getPageByPageId(pageId, true);
+    if (!page || (page.workspace_id && page.workspace_id !== workspaceId && page.workspaceId !== workspaceId)) {
+      return res.status(404).json({ success: false, error: 'Page not found in this workspace' });
+    }
     if (page && page.accessToken) {
       await unsubscribePageFromWebhooks(pageId, page.accessToken);
     }
@@ -1283,8 +1286,9 @@ router.post('/instagram/sync-chats', requireAuth, async (req, res) => {
  * POST /api/integrations/facebook/instagram/send-message
  * Send Instagram DM reply to a customer
  */
-router.post('/instagram/send-message', async (req, res) => {
+router.post('/instagram/send-message', requireAuth, async (req, res) => {
   try {
+    const workspaceId = req.workspaceId;
     const { recipientIgUserId, text, igUserId } = req.body;
 
     if (!recipientIgUserId || !text) {
@@ -1296,7 +1300,7 @@ router.post('/instagram/send-message', async (req, res) => {
       page = await getPageByPageId(`ig_${igUserId}`, true);
     }
     if (!page?.accessToken) {
-      const pages = await getConnectedPages(null, true);
+      const pages = await getConnectedPages(workspaceId, true);
       page = pages.find((p) => p.pageId?.startsWith('ig_') && p.accessToken);
     }
 
@@ -1326,16 +1330,17 @@ router.post('/instagram/send-message', async (req, res) => {
  * GET /api/integrations/facebook/import/preview
  * Safe preview of available historical chats before running an import
  */
-router.get('/import/preview', async (req, res) => {
+router.get('/import/preview', requireAuth, async (req, res) => {
   try {
+    const workspaceId = req.workspaceId;
     const { platform = 'facebook', pageId } = req.query;
 
     let targetPage = null;
     if (platform === 'instagram') {
-      const pages = await getConnectedPages(null, true);
+      const pages = await getConnectedPages(workspaceId, true);
       targetPage = pageId ? pages.find((p) => p.pageId === pageId || p.pageId === `ig_${pageId}`) : pages.find((p) => p.pageId?.startsWith('ig_'));
     } else {
-      targetPage = pageId ? await getPageByPageId(pageId, true) : (await getConnectedPages(null, true)).find((p) => !p.pageId?.startsWith('ig_'));
+      targetPage = pageId ? await getPageByPageId(pageId, true) : (await getConnectedPages(workspaceId, true)).find((p) => !p.pageId?.startsWith('ig_'));
     }
 
     if (!targetPage?.accessToken) {
@@ -1503,10 +1508,14 @@ export async function syncInstagramChats(linkedPageId, pageAccessToken, igUserId
       // Batch query existing messages to eliminate N+1 roundtrips
       let existingIdsSet = new Set();
       if (messageIds.length > 0) {
-        const { data: existingList } = await supabase
+        let msgQuery = supabase
           .from('messages')
           .select('whatsapp_message_id')
           .in('whatsapp_message_id', messageIds);
+        if (workspaceId && workspaceId !== 'default_workspace') {
+          msgQuery = msgQuery.eq('workspace_id', workspaceId);
+        }
+        const { data: existingList } = await msgQuery;
         if (existingList) {
           existingIdsSet = new Set(existingList.map((m) => m.whatsapp_message_id));
         }
@@ -1616,10 +1625,14 @@ export async function syncSinglePageChats(pageId, pageAccessToken, pageName = 'F
       // Batch query existing messages to eliminate N+1 roundtrips
       let existingIdsSet = new Set();
       if (messageIds.length > 0) {
-        const { data: existingList } = await supabase
+        let msgQuery = supabase
           .from('messages')
           .select('whatsapp_message_id')
           .in('whatsapp_message_id', messageIds);
+        if (workspaceId && workspaceId !== 'default_workspace') {
+          msgQuery = msgQuery.eq('workspace_id', workspaceId);
+        }
+        const { data: existingList } = await msgQuery;
         if (existingList) {
           existingIdsSet = new Set(existingList.map((m) => m.whatsapp_message_id));
         }

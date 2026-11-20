@@ -13,16 +13,17 @@ import {
   saveMessage,
   updateMessageStatusByWamid,
 } from '../lib/supabase.js';
-import { optionalAuth, requireAuth } from './auth.js';
+import { requireAuth } from './auth.js';
 
 const router = Router();
 
 // ============================================================================
 // 1. WhatsApp Connection Status & Settings
 // ============================================================================
-router.get('/status', optionalAuth, async (req, res) => {
+router.get('/status', requireAuth, async (req, res) => {
   try {
-    const config = await getActiveWhatsAppConfig(req.workspaceId);
+    const wsId = req.workspaceId;
+    const config = await getActiveWhatsAppConfig(wsId);
     let metaInfo = null;
     let metaError = null;
 
@@ -32,10 +33,11 @@ router.get('/status', optionalAuth, async (req, res) => {
       metaError = err.message;
     }
 
-    // Check Supabase connection
+    // Check Supabase connection — scoped to workspace
     const { count, error: sbError } = await supabase
       .from('contacts')
-      .select('*', { count: 'exact', head: true });
+      .select('*', { count: 'exact', head: true })
+      .eq('workspace_id', wsId);
 
     res.json({
       success: true,
@@ -59,7 +61,7 @@ router.get('/status', optionalAuth, async (req, res) => {
   }
 });
 
-router.get('/config', optionalAuth, async (req, res) => {
+router.get('/config', requireAuth, async (req, res) => {
   try {
     const config = await getActiveWhatsAppConfig(req.workspaceId);
     res.json({
@@ -77,8 +79,10 @@ router.get('/config', optionalAuth, async (req, res) => {
   }
 });
 
-router.post('/config', optionalAuth, async (req, res) => {
+router.post('/config', requireAuth, async (req, res) => {
   try {
+    const wsId = req.workspaceId;
+    if (!wsId) return res.status(401).json({ success: false, error: 'Unauthorized: workspace session required' });
     const { phoneNumberId, wabaId, accessToken, displayPhoneNumber, apiVersion } = req.body;
 
     if (!phoneNumberId || !wabaId || !accessToken) {
@@ -97,7 +101,7 @@ router.post('/config', optionalAuth, async (req, res) => {
         display_phone_number: displayPhoneNumber,
         api_version: apiVersion || 'v25.0',
         is_active: true,
-        workspace_id: req.workspaceId,
+        workspace_id: wsId,
       })
       .select()
       .single();
@@ -118,7 +122,7 @@ router.post('/config', optionalAuth, async (req, res) => {
  * POST /api/whatsapp/send-template
  * Send WhatsApp template message (e.g. jaspers_market_order_confirmation_v1)
  */
-router.post('/send-template', optionalAuth, async (req, res) => {
+router.post('/send-template', requireAuth, async (req, res) => {
   try {
     const {
       to,
@@ -163,7 +167,7 @@ router.post('/send-template', optionalAuth, async (req, res) => {
  * POST /api/whatsapp/send-text
  * Send standard WhatsApp text message
  */
-router.post('/send-text', optionalAuth, async (req, res) => {
+router.post('/send-text', requireAuth, async (req, res) => {
   try {
     const { to, text, customerName, previewUrl = false } = req.body;
 
@@ -192,7 +196,7 @@ router.post('/send-text', optionalAuth, async (req, res) => {
 // 3. Fetch Templates & Chat History from Supabase
 // ============================================================================
 
-router.get('/templates', optionalAuth, async (req, res) => {
+router.get('/templates', requireAuth, async (req, res) => {
   try {
     const templates = await fetchMetaTemplates();
     res.json({ success: true, data: templates });
@@ -278,8 +282,12 @@ router.post('/contacts', requireAuth, async (req, res) => {
 // ============================================================================
 // 4. WhatsApp Broadcast Campaign
 // ============================================================================
-router.post('/broadcast', optionalAuth, async (req, res) => {
+router.post('/broadcast', requireAuth, async (req, res) => {
   try {
+    const wsId = req.workspaceId;
+    if (!wsId || wsId === 'default_workspace') {
+      return res.status(401).json({ success: false, error: 'Unauthorized: valid workspace required' });
+    }
     const {
       name,
       recipients = [], // Array of phone numbers or objects: [{ phone: '92301...', name: 'Ali' }]
@@ -300,6 +308,7 @@ router.post('/broadcast', optionalAuth, async (req, res) => {
     const { data: broadcast, error: bcError } = await supabase
       .from('broadcasts')
       .insert({
+        workspace_id: wsId,
         name,
         channel: 'whatsapp',
         message_type: templateName ? 'template' : 'text',
