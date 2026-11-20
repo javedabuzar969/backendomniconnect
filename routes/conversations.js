@@ -83,10 +83,15 @@ router.get('/', async (req, res) => {
       : contacts;
 
     // Filter out contacts from channels that are disconnected
-    const { data: connectedFbPages } = await supabase
+    let fbPagesQuery = supabase
       .from('facebook_pages')
       .select('page_id, category, status')
       .eq('status', 'connected');
+
+    if (wsId && wsId !== 'default_workspace') {
+      fbPagesQuery = fbPagesQuery.eq('workspace_id', wsId);
+    }
+    const { data: connectedFbPages } = await fbPagesQuery;
 
     const hasActiveInstagram = connectedFbPages?.some(
       (p) => p.category === 'Instagram' || p.page_id?.startsWith('ig_')

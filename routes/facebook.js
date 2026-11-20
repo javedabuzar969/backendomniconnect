@@ -45,9 +45,6 @@ function optionalAuth(req, res, next) {
       req.workspaceId = decoded.workspaceId || decoded.userId;
     } catch {}
   }
-  if (!req.workspaceId) {
-    req.workspaceId = 'default_workspace';
-  }
   next();
 }
 
@@ -84,9 +81,12 @@ router.get('/config', (req, res) => {
  * GET /api/integrations/facebook/oauth/start
  * Generates secure CSRF state and returns official Meta OAuth authorization URL
  */
-router.get('/oauth/start', async (req, res) => {
+router.get('/oauth/start', optionalAuth, async (req, res) => {
   try {
-    const workspaceId = req.query.workspaceId || 'default_workspace';
+    const workspaceId = req.workspaceId || req.query.workspaceId;
+    if (!workspaceId || workspaceId === 'default_workspace') {
+      return res.status(401).json({ success: false, error: 'Unauthorized: valid workspace required' });
+    }
     const state = crypto.randomBytes(24).toString('hex');
     const redirectUri = getRedirectUri(req);
 
@@ -287,25 +287,16 @@ router.get('/oauth/callback', async (req, res) => {
  * GET /api/integrations/facebook/pages
  * Retrieves connected Facebook Pages and/or available Pages from an active Meta OAuth session
  */
-router.get('/pages', optionalAuth, async (req, res) => {
+router.get('/pages', requireAuth, async (req, res) => {
   try {
     const { state } = req.query;
-    const workspaceId = req.workspaceId || 'default_workspace';
+    const workspaceId = req.workspaceId;
 
-    let rawConnectedPages = await getConnectedPages(workspaceId, false);
-    if (!rawConnectedPages || rawConnectedPages.length === 0) {
-      const { data: dbPages } = await supabase.from('facebook_pages').select('*').eq('status', 'connected');
-      rawConnectedPages = (dbPages || []).map((p) => ({
-        id: p.page_id,
-        pageId: p.page_id,
-        name: p.page_name,
-        pageName: p.page_name,
-        category: p.category,
-        picture: p.picture_url,
-        pictureUrl: p.picture_url,
-        status: p.status,
-      }));
+    if (!workspaceId || workspaceId === 'default_workspace') {
+      return res.status(401).json({ success: false, error: 'Unauthorized: valid workspace required' });
     }
+
+    let rawConnectedPages = (await getConnectedPages(workspaceId, false)) || [];
 
     // Separate Facebook Pages vs Instagram
     const fbConnectedPages = (rawConnectedPages || []).filter(
@@ -358,11 +349,15 @@ router.get('/pages', optionalAuth, async (req, res) => {
  * POST /api/integrations/facebook/connect-page
  * Connects a selected real Facebook Page and subscribes it to Messenger webhooks
  */
-router.post('/connect-page', optionalAuth, async (req, res) => {
+router.post('/connect-page', requireAuth, async (req, res) => {
   try {
     const { pageId, state } = req.body;
-    const workspaceId = req.workspaceId || 'default_workspace';
+    const workspaceId = req.workspaceId;
     const userId = req.userId || null;
+
+    if (!workspaceId || workspaceId === 'default_workspace') {
+      return res.status(401).json({ success: false, error: 'Unauthorized: valid workspace required' });
+    }
 
     if (!pageId) {
       return res.status(400).json({ success: false, error: 'pageId is required' });
@@ -423,7 +418,7 @@ router.post('/connect-page', optionalAuth, async (req, res) => {
     console.log(`[Facebook Page Connected] "${targetPage.name}" (ID: ${pageId}) - Webhook: ${webhookStatus}`);
 
     // Auto-sync initial conversations in background
-    syncSinglePageChats(targetPage.id || targetPage.pageId, pageAccessToken, targetPage.name).catch((syncErr) => {
+    syncSinglePageChats(targetPage.id || targetPage.pageId, pageAccessToken, targetPage.name, workspaceId).catch((syncErr) => {
       console.warn('[Facebook Page Connect] Initial sync error:', syncErr.message);
     });
 
@@ -449,10 +444,13 @@ router.post('/connect-page', optionalAuth, async (req, res) => {
  * POST /api/integrations/facebook/disconnect-page
  * Disconnects a Facebook Page and unsubscribes from webhook events
  */
-router.post('/disconnect-page', optionalAuth, async (req, res) => {
+router.post('/disconnect-page', requireAuth, async (req, res) => {
   try {
     const { pageId } = req.body;
-    const workspaceId = req.workspaceId || 'default_workspace';
+    const workspaceId = req.workspaceId;
+    if (!workspaceId || workspaceId === 'default_workspace') {
+      return res.status(401).json({ success: false, error: 'Unauthorized: valid workspace required' });
+    }
     if (!pageId) return res.status(400).json({ success: false, error: 'pageId is required' });
 
     const page = await getPageByPageId(pageId, true);
@@ -481,20 +479,21 @@ router.post('/disconnect-page', optionalAuth, async (req, res) => {
  * Disconnects Instagram account(s), revokes webhooks, updates status to 'disconnected',
  * and cleans up Instagram contacts/conversations so they don't linger in Inbox.
  */
-router.post('/instagram/disconnect', optionalAuth, async (req, res) => {
+router.post('/instagram/disconnect', requireAuth, async (req, res) => {
   try {
-    const workspaceId = req.workspaceId || 'default_workspace';
+    const workspaceId = req.workspaceId;
+    if (!workspaceId || workspaceId === 'default_workspace') {
+      return res.status(401).json({ success: false, error: 'Unauthorized: valid workspace required' });
+    }
     const { deleteChats = true } = req.body;
 
     // 1. Mark all Instagram pages as disconnected
     let query = supabase
       .from('facebook_pages')
       .update({ status: 'disconnected', access_token: 'REVOKED' })
-      .or('category.eq.Instagram,page_id.ilike.ig_%');
+      .or('category.eq.Instagram,page_id.ilike.ig_%')
+      .eq('workspace_id', workspaceId);
 
-    if (workspaceId && workspaceId !== 'default_workspace') {
-      query = query.eq('workspace_id', workspaceId);
-    }
     await query;
 
     // 2. Do not delete contacts or messages from DB; status 'disconnected' automatically hides them from Inbox
@@ -854,9 +853,13 @@ router.post('/webhook', async (req, res) => {
  * POST /api/integrations/facebook/send-message
  * Send a direct reply to a Facebook Messenger customer
  */
-router.post('/send-message', optionalAuth, async (req, res) => {
+router.post('/send-message', requireAuth, async (req, res) => {
   try {
     const { recipientPsid, text, pageId } = req.body;
+    const workspaceId = req.workspaceId;
+    if (!workspaceId || workspaceId === 'default_workspace') {
+      return res.status(401).json({ success: false, error: 'Unauthorized: valid workspace required' });
+    }
 
     if (!recipientPsid || !text) {
       return res.status(400).json({ success: false, error: 'recipientPsid and text are required' });
@@ -865,9 +868,12 @@ router.post('/send-message', optionalAuth, async (req, res) => {
     let page = null;
     if (pageId) {
       page = await getPageByPageId(pageId, true);
+      if (page && page.workspace_id && page.workspace_id !== workspaceId) {
+        page = null;
+      }
     }
     if (!page || !page.accessToken) {
-      const pages = await getConnectedPages(null, true);
+      const pages = await getConnectedPages(workspaceId, true);
       page = pages.find((p) => p.accessToken && !p.pageId?.startsWith('ig_'));
     }
 
@@ -901,9 +907,12 @@ router.post('/send-message', optionalAuth, async (req, res) => {
  * GET /api/integrations/facebook/instagram/oauth/start
  * Starts Instagram DM OAuth flow
  */
-router.get('/instagram/oauth/start', async (req, res) => {
+router.get('/instagram/oauth/start', optionalAuth, async (req, res) => {
   try {
-    const workspaceId = req.query.workspaceId || 'default_workspace';
+    const workspaceId = req.workspaceId || req.query.workspaceId;
+    if (!workspaceId || workspaceId === 'default_workspace') {
+      return res.status(401).json({ success: false, error: 'Unauthorized: valid workspace required' });
+    }
     const state = crypto.randomBytes(24).toString('hex');
     const redirectUri = getRedirectUri(req);
 
@@ -1026,10 +1035,13 @@ router.get('/instagram/oauth/callback', async (req, res) => {
  * GET /api/integrations/facebook/instagram/accounts
  * List Instagram accounts available from active OAuth session OR linked to connected Facebook Page
  */
-router.get('/instagram/accounts', optionalAuth, async (req, res) => {
+router.get('/instagram/accounts', requireAuth, async (req, res) => {
   try {
     const { state } = req.query;
-    const workspaceId = req.workspaceId || 'default_workspace';
+    const workspaceId = req.workspaceId;
+    if (!workspaceId || workspaceId === 'default_workspace') {
+      return res.status(401).json({ success: false, error: 'Unauthorized: valid workspace required' });
+    }
     let igAccounts = [];
     let hasOAuthSession = false;
 
@@ -1051,20 +1063,8 @@ router.get('/instagram/accounts', optionalAuth, async (req, res) => {
 
     // Fallback: If no accounts in session, check connected Facebook Pages for linked Instagram accounts
     if (igAccounts.length === 0) {
-      let connectedPages = await getConnectedPages(workspaceId, true);
-      if (!connectedPages || connectedPages.length === 0) {
-        // Fallback to all connected pages in Supabase if workspace was default_workspace
-        const { data: dbPages } = await supabase.from('facebook_pages').select('*').eq('status', 'connected');
-        if (dbPages && Array.isArray(dbPages)) {
-          connectedPages = dbPages.map((p) => ({
-            pageId: p.page_id,
-            pageName: p.page_name,
-            accessToken: p.access_token,
-            pictureUrl: p.picture_url,
-          }));
-        }
-      }
-      const fbPages = (connectedPages || []).filter((p) => !p.pageId?.startsWith('ig_') && p.accessToken);
+      const connectedPages = (await getConnectedPages(workspaceId, true)) || [];
+      const fbPages = connectedPages.filter((p) => !p.pageId?.startsWith('ig_') && p.accessToken);
 
       for (const p of fbPages) {
         try {
@@ -1103,11 +1103,15 @@ router.get('/instagram/accounts', optionalAuth, async (req, res) => {
  * POST /api/integrations/facebook/instagram/connect-account
  * Connect selected Instagram account and subscribe to webhooks
  */
-router.post('/instagram/connect-account', optionalAuth, async (req, res) => {
+router.post('/instagram/connect-account', requireAuth, async (req, res) => {
   try {
     const { igUserId, state } = req.body;
-    const workspaceId = req.workspaceId || 'default_workspace';
+    const workspaceId = req.workspaceId;
     const userId = req.userId || null;
+
+    if (!workspaceId || workspaceId === 'default_workspace') {
+      return res.status(401).json({ success: false, error: 'Unauthorized: valid workspace required' });
+    }
 
     if (!igUserId) {
       return res.status(400).json({ success: false, error: 'igUserId is required' });
@@ -1123,19 +1127,8 @@ router.post('/instagram/connect-account', optionalAuth, async (req, res) => {
 
     // Fallback: If not in state session, look up across connected Facebook Pages
     if (!targetAccount || !targetAccount.pageAccessToken) {
-      let connectedPages = await getConnectedPages(workspaceId, true);
-      if (!connectedPages || connectedPages.length === 0) {
-        const { data: dbPages } = await supabase.from('facebook_pages').select('*').eq('status', 'connected');
-        if (dbPages && Array.isArray(dbPages)) {
-          connectedPages = dbPages.map((p) => ({
-            pageId: p.page_id,
-            pageName: p.page_name,
-            accessToken: p.access_token,
-            pictureUrl: p.picture_url,
-          }));
-        }
-      }
-      const fbPages = (connectedPages || []).filter((p) => !p.pageId?.startsWith('ig_') && p.accessToken);
+      const connectedPages = (await getConnectedPages(workspaceId, true)) || [];
+      const fbPages = connectedPages.filter((p) => !p.pageId?.startsWith('ig_') && p.accessToken);
 
       for (const p of fbPages) {
         try {
@@ -1229,19 +1222,29 @@ router.post('/instagram/connect-account', optionalAuth, async (req, res) => {
  * POST /api/integrations/facebook/instagram/sync-chats
  * Manually trigger full historical chat sync for connected Instagram accounts
  */
-router.post('/instagram/sync-chats', async (req, res) => {
+router.post('/instagram/sync-chats', requireAuth, async (req, res) => {
   try {
     const { igUserId } = req.body;
+    const workspaceId = req.workspaceId;
+
+    if (!workspaceId || workspaceId === 'default_workspace') {
+      return res.status(401).json({ success: false, error: 'Unauthorized: valid workspace required' });
+    }
+
     let targetPage = null;
 
     if (igUserId) {
       targetPage = await getPageByPageId(`ig_${igUserId}`, true);
+      if (targetPage && targetPage.workspace_id && targetPage.workspace_id !== workspaceId) {
+        targetPage = null;
+      }
     } else {
       const { data: pages } = await supabase
         .from('facebook_pages')
         .select('*')
         .ilike('page_id', 'ig_%')
         .eq('status', 'connected')
+        .eq('workspace_id', workspaceId)
         .limit(1);
       targetPage = pages?.[0];
     }
@@ -1262,6 +1265,7 @@ router.post('/instagram/sync-chats', async (req, res) => {
         .select('*')
         .not('page_id', 'ilike', 'ig_%')
         .eq('status', 'connected')
+        .eq('workspace_id', workspaceId)
         .limit(1);
       if (fbPages?.[0]?.page_id) {
         linkedPageId = fbPages[0].page_id;
@@ -1272,7 +1276,8 @@ router.post('/instagram/sync-chats', async (req, res) => {
       linkedPageId,
       token,
       igId,
-      targetPage.name || targetPage.page_name || 'instagram'
+      targetPage.name || targetPage.page_name || 'instagram',
+      { workspaceId }
     );
 
     res.json({ success: true, ...result });
@@ -1389,25 +1394,29 @@ router.get('/import/preview', async (req, res) => {
  * POST /api/integrations/facebook/import/execute
  * Resumable, duplicate-safe historical import
  */
-router.post('/import/execute', optionalAuth, async (req, res) => {
+router.post('/import/execute', requireAuth, async (req, res) => {
   try {
     const { platform = 'facebook', pageId } = req.body;
+    const workspaceId = req.workspaceId;
+    if (!workspaceId || workspaceId === 'default_workspace') {
+      return res.status(401).json({ success: false, error: 'Unauthorized: valid workspace required' });
+    }
 
     if (platform === 'instagram') {
-      const pages = await getConnectedPages(null, true);
+      const pages = await getConnectedPages(workspaceId, true);
       const targetPage = pageId ? pages.find((p) => p.pageId === pageId || p.pageId === `ig_${pageId}`) : pages.find((p) => p.pageId?.startsWith('ig_'));
       if (!targetPage?.accessToken) {
         return res.status(404).json({ success: false, error: 'No connected Instagram account found' });
       }
       const igId = targetPage.instagramBusinessAccountId || targetPage.metadata?.igUserId || targetPage.pageId.replace(/^ig_/, '');
-      const result = await syncInstagramChats(targetPage.linkedPageId, targetPage.accessToken, igId, targetPage.name);
+      const result = await syncInstagramChats(targetPage.linkedPageId, targetPage.accessToken, igId, targetPage.name, { workspaceId });
       return res.json({ success: true, platform: 'instagram', ...result });
     } else {
-      const targetPage = pageId ? await getPageByPageId(pageId, true) : (await getConnectedPages(null, true)).find((p) => !p.pageId?.startsWith('ig_'));
+      const targetPage = pageId ? await getPageByPageId(pageId, true) : (await getConnectedPages(workspaceId, true)).find((p) => !p.pageId?.startsWith('ig_'));
       if (!targetPage?.accessToken) {
         return res.status(404).json({ success: false, error: 'No connected Facebook Page found' });
       }
-      const result = await syncSinglePageChats(targetPage.pageId, targetPage.accessToken, targetPage.name);
+      const result = await syncSinglePageChats(targetPage.pageId, targetPage.accessToken, targetPage.name, workspaceId);
       return res.json({ success: true, platform: 'facebook', ...result });
     }
   } catch (err) {
@@ -1671,9 +1680,12 @@ export async function syncSinglePageChats(pageId, pageAccessToken, pageName = 'F
  * POST /api/integrations/facebook/sync
  * Manually trigger sync of existing chats from Meta Graph API
  */
-router.all('/sync', optionalAuth, async (req, res) => {
+router.all('/sync', requireAuth, async (req, res) => {
   try {
-    const wsId = req.user?.workspace_id || req.query.workspaceId || req.body.workspaceId || 'default_workspace';
+    const wsId = req.workspaceId;
+    if (!wsId || wsId === 'default_workspace') {
+      return res.status(401).json({ success: false, error: 'Unauthorized: valid workspace required' });
+    }
     const { pageId } = { ...req.query, ...req.body };
     const connectedPages = await getConnectedPages(wsId, true);
 
@@ -1726,9 +1738,12 @@ router.all('/sync', optionalAuth, async (req, res) => {
  * POST /api/integrations/facebook/instagram/sync-chats
  * Direct sync for Instagram Direct messages
  */
-router.post('/instagram/sync-chats', optionalAuth, async (req, res) => {
+router.post('/instagram/sync-chats', requireAuth, async (req, res) => {
   try {
-    const wsId = req.user?.workspace_id || req.query.workspaceId || req.body.workspaceId || 'default_workspace';
+    const wsId = req.workspaceId;
+    if (!wsId || wsId === 'default_workspace') {
+      return res.status(401).json({ success: false, error: 'Unauthorized: valid workspace required' });
+    }
     const pages = await getConnectedPages(wsId, true);
     const igPage = pages.find((p) => p.pageId?.startsWith('ig_') || p.instagramBusinessAccountId);
 
