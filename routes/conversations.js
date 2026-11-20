@@ -141,8 +141,28 @@ router.get('/', async (req, res) => {
       }
     }
 
+    // 3b. Deduplicate contacts by phone_number — keep the one with workspace_id or most recent
+    const contactsByPhone = new Map();
+    for (const c of filteredContacts) {
+      const key = c.phone_number;
+      if (!key) continue;
+      const existing = contactsByPhone.get(key);
+      if (!existing) {
+        contactsByPhone.set(key, c);
+      } else {
+        const existingHasWs = !!existing.workspace_id;
+        const newHasWs = !!c.workspace_id;
+        const existingTime = new Date(existing.last_interaction_at || 0).getTime();
+        const newTime = new Date(c.last_interaction_at || 0).getTime();
+        if ((newHasWs && !existingHasWs) || (newHasWs === existingHasWs && newTime > existingTime)) {
+          contactsByPhone.set(key, c);
+        }
+      }
+    }
+    const dedupedContacts = Array.from(contactsByPhone.values());
+
     // 4. Assemble conversation threads
-    const conversations = filteredContacts.map((contact) => {
+    const conversations = dedupedContacts.map((contact) => {
       const combined = [
         ...(msgsByContactId.get(contact.id) || []),
         ...(msgsByPhone.get(contact.phone_number) || []),
