@@ -4,12 +4,12 @@ import { supabase, saveMessage } from '../lib/supabase.js';
 import { sendWhatsAppText } from '../lib/whatsapp.js';
 import { sendMessengerText, sendInstagramDM } from '../lib/metaGraph.js';
 import { getConnectedPages, getPageByPageId } from '../lib/facebookDb.js';
-import { optionalAuth } from './auth.js';
+import { requireAuth } from './auth.js';
 
 const router = Router();
 
-// Resilient tenant authentication with fallback for active sessions
-router.use(optionalAuth);
+// Strict tenant authentication for Inbox and Live Chat
+router.use(requireAuth);
 
 /**
  * Sanitizes avatar URL: never renders null, undefined, or string literal "null"/"undefined".
@@ -47,24 +47,13 @@ router.get('/', async (req, res) => {
       query = query.eq('channel', channel);
     }
 
-    // Multi-tenant workspace handling — Owner accounts see all workspace channels
-    const isPrimaryUser =
-      req.user?.email === 'javedabuzar969@gmail.com' ||
-      req.user?.email === 'javedabuzar24@gmail.com' ||
-      req.user?.email === 'abuzar@gmail.com' ||
-      req.user?.email === 'abuzarjaved098@gmail.com' ||
-      req.user?.email === 'reviewer@omniconnect.com';
+    // Multi-tenant workspace handling — strictly isolate by active workspace
     const wsId = req.workspaceId;
-
-    if (isPrimaryUser) {
-      // Primary owner sees all contacts across their channels — no restricting filter
-    } else if (wsId && wsId !== 'default_workspace') {
-      // Other logged-in users: their workspace contacts
-      query = query.or(`workspace_id.eq.${wsId},workspace_id.is.null`);
-    } else {
-      // Not authenticated or default_workspace — return nothing
-      return res.json({ success: true, data: [] });
+    if (!wsId || wsId === 'default_workspace') {
+      return res.status(401).json({ success: false, error: 'Unauthorized: valid workspace required' });
     }
+
+    query = query.eq('workspace_id', wsId);
 
     const { data: contacts, error: cErr } = await query;
 
@@ -83,15 +72,11 @@ router.get('/', async (req, res) => {
       : contacts;
 
     // Filter out contacts from channels that are disconnected
-    let fbPagesQuery = supabase
+    const { data: connectedFbPages } = await supabase
       .from('facebook_pages')
       .select('page_id, category, status')
-      .eq('status', 'connected');
-
-    if (wsId && wsId !== 'default_workspace') {
-      fbPagesQuery = fbPagesQuery.eq('workspace_id', wsId);
-    }
-    const { data: connectedFbPages } = await fbPagesQuery;
+      .eq('status', 'connected')
+      .eq('workspace_id', wsId);
 
     const hasActiveInstagram = connectedFbPages?.some(
       (p) => p.category === 'Instagram' || p.page_id?.startsWith('ig_')
@@ -229,23 +214,16 @@ router.get('/', async (req, res) => {
 router.get('/:id', async (req, res) => {
   try {
     const { id } = req.params;
-    const isPrimaryUser =
-      req.user?.email === 'javedabuzar969@gmail.com' ||
-      req.user?.email === 'javedabuzar24@gmail.com' ||
-      req.user?.email === 'abuzar@gmail.com' ||
-      req.user?.email === 'abuzarjaved098@gmail.com' ||
-      req.user?.email === 'reviewer@omniconnect.com';
     const wsId = req.workspaceId;
-    let contactQuery = supabase.from('contacts').select('*').eq('id', id);
-    if (isPrimaryUser) {
-      // Owner sees all contacts — no extra filter
-    } else if (wsId && wsId !== 'default_workspace') {
-      // Other users: strictly their workspace only or shared
-      contactQuery = contactQuery.or(`workspace_id.eq.${wsId},workspace_id.is.null`);
-    } else {
-      return res.status(403).json({ error: 'Access denied.' });
+    if (!wsId || wsId === 'default_workspace') {
+      return res.status(401).json({ error: 'Unauthorized: valid workspace required' });
     }
-    const { data: contact } = await contactQuery.maybeSingle();
+    const { data: contact } = await supabase
+      .from('contacts')
+      .select('*')
+      .eq('id', id)
+      .eq('workspace_id', wsId)
+      .maybeSingle();
     if (!contact) return res.status(404).json({ error: 'Conversation not found or access denied.' });
 
     const { data: msgs } = await supabase
@@ -289,12 +267,17 @@ router.get('/:id', async (req, res) => {
 router.post('/:id/read', async (req, res) => {
   try {
     const { id } = req.params;
-    const { data: contact } = await supabase.from('contacts').select('*').eq('id', id).single();
+    const wsId = req.workspaceId;
+    if (!wsId || wsId === 'default_workspace') {
+      return res.status(401).json({ error: 'Unauthorized: valid workspace required' });
+    }
+    const { data: contact } = await supabase.from('contacts').select('*').eq('id', id).eq('workspace_id', wsId).maybeSingle();
     if (contact) {
       await supabase
         .from('messages')
         .update({ status: 'read' })
         .eq('direction', 'inbound')
+        .eq('workspace_id', wsId)
         .or(`contact_id.eq.${contact.id},phone_number.eq.${contact.phone_number}`);
     }
     return res.json({ success: true, message: 'Marked as read' });
@@ -318,25 +301,16 @@ router.post('/:id/messages', async (req, res) => {
       return res.status(400).json({ error: 'Message content is required' });
     }
 
-    const ownerEmails = [
-      'javedabuzar969@gmail.com',
-      'javedabuzar24@gmail.com',
-      'abuzar@gmail.com',
-      'abuzarjaved098@gmail.com',
-      'reviewer@omniconnect.com',
-    ];
-    const isPrimaryUser = ownerEmails.includes(req.user?.email);
     const wsId = req.workspaceId;
-    let contactQuery = supabase.from('contacts').select('*').eq('id', id);
-    if (isPrimaryUser) {
-      // Owner sees all contacts — no extra filter
-    } else if (wsId && wsId !== 'default_workspace') {
-      // Other users: their workspace OR null-workspace contacts
-      contactQuery = contactQuery.or(`workspace_id.eq.${wsId},workspace_id.is.null`);
-    } else {
-      return res.status(403).json({ error: 'Access denied.' });
+    if (!wsId || wsId === 'default_workspace') {
+      return res.status(401).json({ error: 'Unauthorized: valid workspace required' });
     }
-    const { data: contact } = await contactQuery.maybeSingle();
+    const { data: contact } = await supabase
+      .from('contacts')
+      .select('*')
+      .eq('id', id)
+      .eq('workspace_id', wsId)
+      .maybeSingle();
     if (!contact) return res.status(404).json({ error: 'Contact not found or access denied.' });
 
     let sentExternalId = null;

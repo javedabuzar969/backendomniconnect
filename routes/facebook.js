@@ -35,19 +35,6 @@ import jwt from 'jsonwebtoken';
 const router = Router();
 const JWT_SECRET = process.env.JWT_SECRET || 'omniconnect_secret_2026';
 
-function optionalAuth(req, res, next) {
-  const auth = req.headers.authorization;
-  if (auth?.startsWith('Bearer ')) {
-    try {
-      const decoded = jwt.verify(auth.split(' ')[1], JWT_SECRET);
-      req.user = decoded;
-      req.userId = decoded.userId;
-      req.workspaceId = decoded.workspaceId || decoded.userId;
-    } catch {}
-  }
-  next();
-}
-
 const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:5173';
 const BACKEND_PORT = process.env.PORT || 5000;
 const getRedirectUri = (req) => {
@@ -81,9 +68,9 @@ router.get('/config', (req, res) => {
  * GET /api/integrations/facebook/oauth/start
  * Generates secure CSRF state and returns official Meta OAuth authorization URL
  */
-router.get('/oauth/start', optionalAuth, async (req, res) => {
+router.get('/oauth/start', requireAuth, async (req, res) => {
   try {
-    const workspaceId = req.workspaceId || req.query.workspaceId;
+    const workspaceId = req.workspaceId;
     if (!workspaceId || workspaceId === 'default_workspace') {
       return res.status(401).json({ success: false, error: 'Unauthorized: valid workspace required' });
     }
@@ -640,7 +627,11 @@ router.post('/webhook', async (req, res) => {
               const { data: pageRow } = await supabase.from('facebook_pages').select('*').eq('page_id', String(pageId)).maybeSingle();
               if (pageRow) connectedPage = pageRow;
             }
-            const pageWorkspaceId = connectedPage?.workspace_id || connectedPage?.workspaceId || '81bb9bdc-140b-4f50-ad35-cd75a7b2e4c7';
+            const pageWorkspaceId = connectedPage?.workspace_id || connectedPage?.workspaceId;
+            if (!pageWorkspaceId) {
+              console.warn(`[Meta Webhook] No workspace found for Facebook Page ${pageId}. Skipping message.`);
+              continue;
+            }
             const pageName = connectedPage?.name || 'Facebook Page';
             const pageAccessToken = connectedPage?.accessToken;
 
@@ -767,20 +758,24 @@ router.post('/webhook', async (req, res) => {
               connectedIgPage = await getPageByPageId(igPageId, true);
             }
             if (!connectedIgPage) {
-              const { data: allPages } = await supabase
+              const { data: matchedPages } = await supabase
                 .from('facebook_pages')
                 .select('*')
-                .ilike('page_id', 'ig_%')
+                .eq('instagram_business_account_id', String(igPageId))
                 .eq('status', 'connected')
-                .limit(5);
-              if (allPages?.length) {
-                connectedIgPage = allPages[0];
+                .limit(1);
+              if (matchedPages?.length) {
+                connectedIgPage = matchedPages[0];
               }
             }
 
             const igAccountName = connectedIgPage?.name || `@instagram_${igPageId.slice(-4)}`;
             const pageAccessToken = connectedIgPage?.accessToken || connectedIgPage?.access_token;
-            const igWorkspaceId = connectedIgPage?.workspace_id || connectedIgPage?.workspaceId || '81bb9bdc-140b-4f50-ad35-cd75a7b2e4c7';
+            const igWorkspaceId = connectedIgPage?.workspace_id || connectedIgPage?.workspaceId;
+            if (!igWorkspaceId) {
+              console.warn(`[Instagram Webhook] No workspace found for Instagram Page ${igPageId}. Skipping message.`);
+              continue;
+            }
 
             // Retrieve Instagram sender profile if pageAccessToken is available and message is inbound
             let customerName = `Instagram User ${customerId.slice(-4)}`;
@@ -907,9 +902,9 @@ router.post('/send-message', requireAuth, async (req, res) => {
  * GET /api/integrations/facebook/instagram/oauth/start
  * Starts Instagram DM OAuth flow
  */
-router.get('/instagram/oauth/start', optionalAuth, async (req, res) => {
+router.get('/instagram/oauth/start', requireAuth, async (req, res) => {
   try {
-    const workspaceId = req.workspaceId || req.query.workspaceId;
+    const workspaceId = req.workspaceId;
     if (!workspaceId || workspaceId === 'default_workspace') {
       return res.status(401).json({ success: false, error: 'Unauthorized: valid workspace required' });
     }

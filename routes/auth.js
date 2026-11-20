@@ -103,9 +103,6 @@ export function optionalAuth(req, res, next) {
       req.workspaceId = decoded.workspaceId || decoded.userId;
     } catch {}
   }
-  if (!req.workspaceId) {
-    req.workspaceId = 'default_workspace';
-  }
   next();
 }
 
