@@ -413,9 +413,6 @@ router.get('/webhook', async (req, res) => {
     const validTokens = [
       config?.webhookVerifyToken,
       process.env.WHATSAPP_WEBHOOK_VERIFY_TOKEN,
-      'omniconnect_whatsapp_verify_token_2026',
-      'omniconnect_webhook_secret_2026',
-      'omniconnect_meta_verify_token_2026'
     ].filter(Boolean);
 
     if (mode === 'subscribe' && validTokens.includes(token)) {

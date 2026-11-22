@@ -43,25 +43,30 @@ const getRedirectUri = (req) => {
   return `${protocol}://${host}/api/integrations/facebook/oauth/callback`;
 };
 
+const FB_APP_ID = (process.env.FB_APP_ID || process.env.META_APP_ID || '').trim();
 const FB_APP_SECRET = (process.env.FB_APP_SECRET || process.env.META_APP_SECRET || '').trim();
+const WEBHOOK_VERIFY_TOKEN = (process.env.FB_WEBHOOK_VERIFY_TOKEN || process.env.META_WEBHOOK_VERIFY_TOKEN || '').trim();
+
+if (!FB_APP_ID) {
+  throw new Error('FATAL: FB_APP_ID (or META_APP_ID) environment variable is missing.');
+}
 if (!FB_APP_SECRET) {
   throw new Error('FATAL: FB_APP_SECRET (or META_APP_SECRET) environment variable is missing.');
 }
-
-const WEBHOOK_VERIFY_TOKEN = (process.env.FB_WEBHOOK_VERIFY_TOKEN || process.env.META_WEBHOOK_VERIFY_TOKEN || '').trim();
+if (!WEBHOOK_VERIFY_TOKEN) {
+  throw new Error('FATAL: FB_WEBHOOK_VERIFY_TOKEN (or META_WEBHOOK_VERIFY_TOKEN) environment variable is missing.');
+}
 
 /**
  * GET /api/integrations/facebook/config
  * Returns public Meta configuration (never exposes app secret or page tokens)
  */
 router.get('/config', (req, res) => {
-  const rawId = (process.env.FB_APP_ID || process.env.META_APP_ID || '').trim();
   res.json({
     success: true,
     data: {
-      appId: rawId,
+      appId: FB_APP_ID,
       redirectUri: getRedirectUri(req),
-      webhookVerifyToken: WEBHOOK_VERIFY_TOKEN,
     },
   });
 });
@@ -544,20 +549,7 @@ router.post('/webhook', async (req, res) => {
     const sigHeader = req.headers['x-hub-signature-256'];
     const rawPayload = req.rawBody;
 
-    // Audit log incoming webhook payload in Supabase
-    try {
-      await supabase.from('whatsapp_webhooks_log').insert({
-        event_type: req.body?.object || 'meta_webhook',
-        payload: {
-          object: req.body?.object,
-          entryCount: req.body?.entry?.length || 0,
-          hasSigHeader: Boolean(sigHeader),
-          rawBodyType: typeof req.rawBody,
-        },
-      });
-    } catch (_) {}
-
-    // Signature verification using raw request body and FB_APP_SECRET
+    // 1. Signature verification using raw request body and FB_APP_SECRET
     if (!sigHeader || typeof sigHeader !== 'string' || !sigHeader.startsWith('sha256=')) {
       console.warn('[Meta Webhook] Missing or malformed x-hub-signature-256 header.');
       return res.status(403).json({ error: 'Signature header missing or malformed' });
@@ -576,6 +568,19 @@ router.post('/webhook', async (req, res) => {
       console.warn('[Meta Webhook] Invalid webhook signature rejected.');
       return res.status(403).json({ error: 'Invalid webhook signature' });
     }
+
+    // 2. Audit log verified webhook payload in Supabase (only after signature check passes)
+    try {
+      await supabase.from('whatsapp_webhooks_log').insert({
+        event_type: req.body?.object || 'meta_webhook',
+        payload: {
+          object: req.body?.object,
+          entryCount: req.body?.entry?.length || 0,
+          hasSigHeader: Boolean(sigHeader),
+          rawBodyType: typeof req.rawBody,
+        },
+      });
+    } catch (_) {}
 
     const body = req.body;
 
@@ -1823,12 +1828,7 @@ router.post('/data-deletion', async (req, res) => {
     }
 
     const [encodedSig, payload] = signedRequest.split('.');
-    const rawSecret = (process.env.META_APP_SECRET || '').trim();
-    const appSecret = (!rawSecret || rawSecret === '4eacc74ed8e790d1135e63db24f74a51') ? '4802d7203a7e0ea2a19b40f554dd4032' : rawSecret;
-
-    if (!appSecret) {
-      console.warn('[Meta Data Deletion] META_APP_SECRET is not configured');
-    }
+    const appSecret = FB_APP_SECRET;
 
     // Decode signature
     const sig = Buffer.from(encodedSig.replace(/-/g, '+').replace(/_/g, '/'), 'base64');

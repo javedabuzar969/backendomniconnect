@@ -18,7 +18,7 @@ CREATE TABLE IF NOT EXISTS public.whatsapp_settings (
     waba_id TEXT NOT NULL,
     access_token TEXT NOT NULL,
     display_phone_number TEXT,
-    webhook_verify_token TEXT DEFAULT 'omniconnect_webhook_secret_2026',
+    webhook_verify_token TEXT,
     api_version TEXT DEFAULT 'v25.0',
     is_active BOOLEAN DEFAULT true,
     created_at TIMESTAMPTZ DEFAULT timezone('utc'::text, now()) NOT NULL,

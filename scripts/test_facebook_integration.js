@@ -6,7 +6,7 @@ import { supabase } from '../lib/supabase.js';
 import { saveConnectedPage, getConnectedPages, disconnectPage } from '../lib/facebookDb.js';
 
 const BASE_URL = `http://localhost:${process.env.PORT || 5000}`;
-const VERIFY_TOKEN = process.env.META_WEBHOOK_VERIFY_TOKEN || 'omniconnect_meta_verify_token_2026';
+const VERIFY_TOKEN = (process.env.FB_WEBHOOK_VERIFY_TOKEN || process.env.META_WEBHOOK_VERIFY_TOKEN || '').trim();
 
 let passed = 0;
 let failed = 0;

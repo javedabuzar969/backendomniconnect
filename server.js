@@ -1,13 +1,22 @@
 // backend/server.js — Main Express Server
 import 'dotenv/config';
 
-if (!process.env.JWT_SECRET) {
-  throw new Error('FATAL: JWT_SECRET environment variable is missing.');
+const missingEnvVars = [];
+if (!process.env.JWT_SECRET?.trim()) {
+  missingEnvVars.push('JWT_SECRET');
+}
+if (!(process.env.FB_APP_ID || process.env.META_APP_ID)?.trim()) {
+  missingEnvVars.push('FB_APP_ID (or META_APP_ID)');
+}
+if (!(process.env.FB_APP_SECRET || process.env.META_APP_SECRET)?.trim()) {
+  missingEnvVars.push('FB_APP_SECRET (or META_APP_SECRET)');
+}
+if (!(process.env.FB_WEBHOOK_VERIFY_TOKEN || process.env.META_WEBHOOK_VERIFY_TOKEN)?.trim()) {
+  missingEnvVars.push('FB_WEBHOOK_VERIFY_TOKEN (or META_WEBHOOK_VERIFY_TOKEN)');
 }
 
-const FB_APP_SECRET = process.env.FB_APP_SECRET || process.env.META_APP_SECRET;
-if (!FB_APP_SECRET) {
-  throw new Error('FATAL: FB_APP_SECRET (or META_APP_SECRET) environment variable is missing.');
+if (missingEnvVars.length > 0) {
+  throw new Error(`FATAL: Missing required environment variable(s): ${missingEnvVars.join(', ')}`);
 }
 
 import express from 'express';
