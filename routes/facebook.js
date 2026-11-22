@@ -43,18 +43,23 @@ const getRedirectUri = (req) => {
   return `${protocol}://${host}/api/integrations/facebook/oauth/callback`;
 };
 
-const WEBHOOK_VERIFY_TOKEN = (process.env.META_WEBHOOK_VERIFY_TOKEN || 'omniconnect_meta_verify_token_2026').trim();
+const FB_APP_SECRET = (process.env.FB_APP_SECRET || process.env.META_APP_SECRET || '').trim();
+if (!FB_APP_SECRET) {
+  throw new Error('FATAL: FB_APP_SECRET (or META_APP_SECRET) environment variable is missing.');
+}
+
+const WEBHOOK_VERIFY_TOKEN = (process.env.FB_WEBHOOK_VERIFY_TOKEN || process.env.META_WEBHOOK_VERIFY_TOKEN || '').trim();
 
 /**
  * GET /api/integrations/facebook/config
  * Returns public Meta configuration (never exposes app secret or page tokens)
  */
 router.get('/config', (req, res) => {
-  const rawId = (process.env.META_APP_ID || '').trim();
+  const rawId = (process.env.FB_APP_ID || process.env.META_APP_ID || '').trim();
   res.json({
     success: true,
     data: {
-      appId: (!rawId || rawId === '1805149667346137') ? '1716326016812279' : rawId,
+      appId: rawId,
       redirectUri: getRedirectUri(req),
       webhookVerifyToken: WEBHOOK_VERIFY_TOKEN,
     },
@@ -347,6 +352,21 @@ router.post('/connect-page', requireAuth, async (req, res) => {
       return res.status(400).json({ success: false, error: 'pageId is required' });
     }
 
+    // Check if page is already connected to another workspace
+    const { data: existingConflict } = await supabase
+      .from('facebook_pages')
+      .select('workspace_id, status')
+      .eq('page_id', String(pageId))
+      .eq('status', 'connected')
+      .maybeSingle();
+
+    if (existingConflict && existingConflict.workspace_id && existingConflict.workspace_id !== workspaceId) {
+      return res.status(409).json({
+        success: false,
+        error: 'Yeh page pehle se kisi aur account se connected hai.',
+      });
+    }
+
     let targetPage = null;
     let pageAccessToken = null;
 
@@ -505,15 +525,7 @@ router.get('/webhook', (req, res) => {
   const token = req.query['hub.verify_token'];
   const challenge = req.query['hub.challenge'];
 
-  const validTokens = [
-    WEBHOOK_VERIFY_TOKEN,
-    process.env.META_WEBHOOK_VERIFY_TOKEN,
-    'omniconnect_meta_verify_token_2026',
-    'omniconnect_webhook_secret_2026',
-    'omniconnect_whatsapp_verify_token_2026'
-  ].filter(Boolean);
-
-  if (mode === 'subscribe' && validTokens.includes(token)) {
+  if (mode === 'subscribe' && WEBHOOK_VERIFY_TOKEN && token === WEBHOOK_VERIFY_TOKEN) {
     console.log('[Meta Webhook Verified Successfully]');
     return res.status(200).send(challenge);
   }
@@ -530,7 +542,7 @@ router.get('/webhook', (req, res) => {
 router.post('/webhook', async (req, res) => {
   try {
     const sigHeader = req.headers['x-hub-signature-256'];
-    const rawPayload = req.rawBody || req.body;
+    const rawPayload = req.rawBody;
 
     // Audit log incoming webhook payload in Supabase
     try {
@@ -545,17 +557,24 @@ router.post('/webhook', async (req, res) => {
       });
     } catch (_) {}
 
-    // Signature verification using raw request body and Meta App Secret
-    if (process.env.META_APP_SECRET) {
-      if (!sigHeader) {
-        console.warn('[Meta Webhook] Missing x-hub-signature-256 header.');
-        return res.status(401).json({ error: 'Signature header missing' });
-      }
-      const isSigValid = verifyWebhookSignature(sigHeader, rawPayload);
-      if (!isSigValid) {
-        console.warn('[Meta Webhook] Invalid webhook signature rejected.');
-        return res.status(403).json({ error: 'Invalid webhook signature' });
-      }
+    // Signature verification using raw request body and FB_APP_SECRET
+    if (!sigHeader || typeof sigHeader !== 'string' || !sigHeader.startsWith('sha256=')) {
+      console.warn('[Meta Webhook] Missing or malformed x-hub-signature-256 header.');
+      return res.status(403).json({ error: 'Signature header missing or malformed' });
+    }
+
+    const signatureHex = sigHeader.slice(7);
+    const expectedHex = crypto
+      .createHmac('sha256', FB_APP_SECRET)
+      .update(rawPayload || '')
+      .digest('hex');
+
+    const sigBuffer = Buffer.from(signatureHex, 'hex');
+    const expectedBuffer = Buffer.from(expectedHex, 'hex');
+
+    if (sigBuffer.length !== expectedBuffer.length || !crypto.timingSafeEqual(sigBuffer, expectedBuffer)) {
+      console.warn('[Meta Webhook] Invalid webhook signature rejected.');
+      return res.status(403).json({ error: 'Invalid webhook signature' });
     }
 
     const body = req.body;
@@ -1110,6 +1129,22 @@ router.post('/instagram/connect-account', requireAuth, async (req, res) => {
 
     if (!igUserId) {
       return res.status(400).json({ success: false, error: 'igUserId is required' });
+    }
+
+    // Check if Instagram account is already connected to another workspace
+    const targetIgPageId = `ig_${igUserId}`;
+    const { data: existingIgConflict } = await supabase
+      .from('facebook_pages')
+      .select('workspace_id, status')
+      .eq('page_id', targetIgPageId)
+      .eq('status', 'connected')
+      .maybeSingle();
+
+    if (existingIgConflict && existingIgConflict.workspace_id && existingIgConflict.workspace_id !== workspaceId) {
+      return res.status(409).json({
+        success: false,
+        error: 'Yeh Instagram account pehle se kisi aur account se connected hai.',
+      });
     }
 
     let targetAccount = null;

@@ -5,6 +5,11 @@ if (!process.env.JWT_SECRET) {
   throw new Error('FATAL: JWT_SECRET environment variable is missing.');
 }
 
+const FB_APP_SECRET = process.env.FB_APP_SECRET || process.env.META_APP_SECRET;
+if (!FB_APP_SECRET) {
+  throw new Error('FATAL: FB_APP_SECRET (or META_APP_SECRET) environment variable is missing.');
+}
+
 import express from 'express';
 import cors from 'cors';
 import authRouter from './routes/auth.js';
