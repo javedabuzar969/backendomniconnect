@@ -14,6 +14,9 @@ if (!(process.env.FB_APP_SECRET || process.env.META_APP_SECRET)?.trim()) {
 if (!(process.env.FB_WEBHOOK_VERIFY_TOKEN || process.env.META_WEBHOOK_VERIFY_TOKEN)?.trim()) {
   missingEnvVars.push('FB_WEBHOOK_VERIFY_TOKEN (or META_WEBHOOK_VERIFY_TOKEN)');
 }
+if (!(process.env.TOKEN_ENCRYPTION_KEY || process.env.SALESFORCE_TOKEN_ENCRYPTION_KEY)?.trim()) {
+  missingEnvVars.push('TOKEN_ENCRYPTION_KEY (or SALESFORCE_TOKEN_ENCRYPTION_KEY)');
+}
 
 if (missingEnvVars.length > 0) {
   throw new Error(`FATAL: Missing required environment variable(s): ${missingEnvVars.join(', ')}`);

@@ -1,6 +1,6 @@
 // backend/routes/conversations.js — API for Inbox conversations & live chat
 import { Router } from 'express';
-import { supabase, saveMessage } from '../lib/supabase.js';
+import { supabase, saveMessage, getActiveWhatsAppConfig } from '../lib/supabase.js';
 import { sendWhatsAppText } from '../lib/whatsapp.js';
 import { sendMessengerText, sendInstagramDM } from '../lib/metaGraph.js';
 import { getConnectedPages, getPageByPageId } from '../lib/facebookDb.js';
@@ -322,15 +322,23 @@ router.post('/:id/messages', async (req, res) => {
     // ── 1. WhatsApp Reply ──────────────────────────────────────────────
     if (contact.channel === 'whatsapp') {
       try {
+        const waConfig = await getActiveWhatsAppConfig(wsId);
+        if (!waConfig || !waConfig.accessToken) {
+          return res.status(400).json({ error: 'WhatsApp not connected' });
+        }
         const sentWa = await sendWhatsAppText({
           to: contact.phone_number,
           text: content.trim(),
           customerName: contact.name,
+          workspaceId: wsId,
         });
         sentExternalId = sentWa?.wamid || null;
         sendStatus = 'sent';
       } catch (waErr) {
         console.error('[WhatsApp Send API Error]:', waErr.message);
+        if (waErr.message === 'WhatsApp not connected') {
+          return res.status(400).json({ error: 'WhatsApp not connected' });
+        }
         sendError = waErr.message;
         sendStatus = 'failed';
       }

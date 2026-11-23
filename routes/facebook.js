@@ -1620,8 +1620,8 @@ export async function syncInstagramChats(linkedPageId, pageAccessToken, igUserId
  */
 export async function syncSinglePageChats(pageId, pageAccessToken, pageName = 'Facebook Page', workspaceId = null) {
   try {
-    const resolvedPageName = (!pageName || pageName === 'undefined' || pageName === 'Facebook Page')
-      ? 'Omniconnect'
+    const resolvedPageName = (!pageName || pageName === 'undefined')
+      ? 'Facebook Page'
       : pageName;
 
     const conversations = await fetchPageConversations(pageId, pageAccessToken, null, 1);
