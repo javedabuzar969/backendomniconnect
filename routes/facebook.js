@@ -96,6 +96,8 @@ router.get('/oauth/start', requireAuth, async (req, res) => {
       redirectUri,
     });
 
+    console.log('[Meta OAuth Start] Generated Login URL redirect_uri:', redirectUri);
+
     if (req.headers.accept?.includes('application/json') || req.query.format === 'json') {
       return res.json({ success: true, oauthUrl, state });
     }
@@ -151,9 +153,15 @@ router.get('/oauth/callback', async (req, res) => {
     return res.status(400).send('Invalid or expired OAuth session. Please try connecting again.');
   }
 
+  const redirectUri = session.redirectUri || getRedirectUri(req);
+
   try {
     // 1. Server-side exchange authorization code for long-lived user token
-    const redirectUri = session.redirectUri || getRedirectUri(req);
+    console.log('[Meta OAuth Token Exchange] Request params:', {
+      redirect_uri: redirectUri,
+      client_id: FB_APP_ID,
+      client_secret_length: FB_APP_SECRET ? FB_APP_SECRET.length : 0,
+    });
     const tokenData = await exchangeCodeForTokens(code, redirectUri);
     const userAccessToken = tokenData.userAccessToken;
 
@@ -272,8 +280,16 @@ router.get('/oauth/callback', async (req, res) => {
       </html>
     `);
   } catch (exchangeErr) {
-    console.error('[Meta OAuth Token Exchange Error]:', exchangeErr.message);
-    return res.status(500).send(`Authentication error: ${exchangeErr.message}`);
+    console.error('[Meta OAuth Token Exchange Error]:', {
+      status: exchangeErr.response?.status,
+      message: exchangeErr.response?.data?.error?.message || exchangeErr.message,
+      code: exchangeErr.response?.data?.error?.code,
+      error_subcode: exchangeErr.response?.data?.error?.error_subcode,
+      redirect_uri: redirectUri,
+      client_id: FB_APP_ID,
+      client_secret_length: FB_APP_SECRET ? FB_APP_SECRET.length : 0,
+    });
+    return res.status(500).send(`Authentication error: ${exchangeErr.response?.data?.error?.message || exchangeErr.message}`);
   }
 });
 
@@ -947,6 +963,8 @@ router.get('/instagram/oauth/start', requireAuth, async (req, res) => {
       redirectUri,
     });
 
+    console.log('[Instagram OAuth Start] Generated Login URL redirect_uri:', redirectUri);
+
     if (req.headers.accept?.includes('application/json') || req.query.format === 'json') {
       return res.json({ success: true, oauthUrl, state });
     }
@@ -991,8 +1009,14 @@ router.get('/instagram/oauth/callback', async (req, res) => {
     return res.status(400).send('Invalid or expired OAuth session. Please try connecting again.');
   }
 
+  const redirectUri = session.redirectUri || getRedirectUri(req);
+
   try {
-    const redirectUri = session.redirectUri || getRedirectUri(req);
+    console.log('[Instagram OAuth Token Exchange] Request params:', {
+      redirect_uri: redirectUri,
+      client_id: FB_APP_ID,
+      client_secret_length: FB_APP_SECRET ? FB_APP_SECRET.length : 0,
+    });
     const tokenData = await exchangeCodeForTokens(code, redirectUri);
     const userAccessToken = tokenData.userAccessToken;
 
@@ -1045,8 +1069,16 @@ router.get('/instagram/oauth/callback', async (req, res) => {
       </html>
     `);
   } catch (err) {
-    console.error('[Instagram OAuth Callback Error]:', err.message);
-    return res.status(500).send(`Instagram authentication error: ${err.message}`);
+    console.error('[Instagram OAuth Callback Error]:', {
+      status: err.response?.status,
+      message: err.response?.data?.error?.message || err.message,
+      code: err.response?.data?.error?.code,
+      error_subcode: err.response?.data?.error?.error_subcode,
+      redirect_uri: redirectUri,
+      client_id: FB_APP_ID,
+      client_secret_length: FB_APP_SECRET ? FB_APP_SECRET.length : 0,
+    });
+    return res.status(500).send(`Instagram authentication error: ${err.response?.data?.error?.message || err.message}`);
   }
 });
 
